@@ -4,6 +4,39 @@ import path from "node:path";
 import os from "node:os";
 import { registerTaskTools } from "../src/tools/task-tools.ts";
 
+/**
+ * Mirrors the dsh harness lossless-JSON snapshot boundary
+ * (deepseek-harness packages/core/session/src/json.ts):
+ * rejects undefined own-property values, non-finite numbers, -0,
+ * exotic prototypes, sparse arrays and cyclic structures.
+ */
+function assertLosslessJson(value: unknown, path = "value", seen = new Set<object>()): void {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new Error(`${path} is not a lossless JSON number`);
+    }
+    return;
+  }
+  if (typeof value !== "object") {
+    throw new Error(`${path} is not lossless JSON (typeof ${typeof value})`);
+  }
+  if (seen.has(value as object)) throw new Error(`${path} is cyclic`);
+  seen.add(value as object);
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) assertLosslessJson(value[i], `${path}[${i}]`, seen);
+    return;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new Error(`${path} has a non-plain prototype`);
+  }
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v === undefined) throw new Error(`${path}.${key} is undefined (dropped by JSON round-trip)`);
+    assertLosslessJson(v, `${path}.${key}`, seen);
+  }
+}
+
 describe("registerTaskTools", () => {
   let tmpDir: string;
   const mockWorkspace = "/Users/zhangbei/code/my-agent-project";
@@ -133,5 +166,66 @@ describe("registerTaskTools", () => {
     });
     expect(archiveRes.ok).toBe(true);
     expect(archiveRes.task.status).toBe("archived");
+  });
+
+  it("should return lossless-JSON outputs for every action (harness snapshot boundary)", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: {
+        register: (tool: any) => {
+          registeredTool = tool;
+          return () => {};
+        },
+      },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    const createRes = await registeredTool.execute({
+      action: "create",
+      title: "Lossless check",
+      workspacePath: mockWorkspace,
+    });
+    expect(() => assertLosslessJson(createRes, "create")).not.toThrow();
+
+    const batchRes = await registeredTool.execute({
+      action: "create",
+      tasks: [{ title: "Batch A" }, { title: "Batch B", priority: "P0" }],
+      workspacePath: mockWorkspace,
+    });
+    expect(() => assertLosslessJson(batchRes, "batchCreate")).not.toThrow();
+
+    const updateRes = await registeredTool.execute({
+      action: "update",
+      taskId: "TASK-001",
+      status: "in_progress",
+      workspacePath: mockWorkspace,
+    });
+    expect(() => assertLosslessJson(updateRes, "update")).not.toThrow();
+
+    const concludeRes = await registeredTool.execute({
+      action: "conclude",
+      taskId: "TASK-001",
+      summary: "done",
+      workspacePath: mockWorkspace,
+    });
+    expect(() => assertLosslessJson(concludeRes, "conclude")).not.toThrow();
+
+    const listRes = await registeredTool.execute({ action: "list", workspacePath: mockWorkspace });
+    expect(() => assertLosslessJson(listRes, "list")).not.toThrow();
+
+    const archiveRes = await registeredTool.execute({
+      action: "archive",
+      taskId: "TASK-002",
+      workspacePath: mockWorkspace,
+    });
+    expect(() => assertLosslessJson(archiveRes, "archive")).not.toThrow();
+
+    const deleteRes = await registeredTool.execute({
+      action: "delete",
+      taskId: "TASK-003",
+      workspacePath: mockWorkspace,
+    });
+    expect(() => assertLosslessJson(deleteRes, "delete")).not.toThrow();
   });
 });
