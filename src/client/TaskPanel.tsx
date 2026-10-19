@@ -281,9 +281,9 @@ function useTasks(workspacePath: string): {
     };
   }, [workspacePath, tick]);
 
-  // 静默轮询（每 5 秒刷新当前工作区状态，捕获 Agent 的后台变更）
+  // 静默轮询（每 3 秒刷新，并监听 window focus 及自定义刷新事件）
   useEffect(() => {
-    const timer = setInterval(() => {
+    const fetchLatest = () => {
       const query = workspacePath ? `?workspacePath=${encodeURIComponent(workspacePath)}` : "";
       fetch(`${API_BASE}/list${query}`, { cache: "no-store" })
         .then((r) => r.json() as Promise<ListResponse>)
@@ -294,8 +294,18 @@ function useTasks(workspacePath: string): {
           }
         })
         .catch(() => {});
-    }, 5000);
-    return () => clearInterval(timer);
+    };
+
+    const timer = setInterval(fetchLatest, 3000);
+    const onRefreshEvent = () => fetchLatest();
+    window.addEventListener("focus", onRefreshEvent);
+    window.addEventListener("dsh-tasks:refresh", onRefreshEvent);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onRefreshEvent);
+      window.removeEventListener("dsh-tasks:refresh", onRefreshEvent);
+    };
   }, [workspacePath]);
 
   return {

@@ -1,5 +1,11 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type { TaskPriority, TaskStatus } from "../store/types.ts";
+export interface TaskCreateItem {
+    title: string;
+    description?: string;
+    priority?: TaskPriority;
+    assignee?: string;
+}
 export interface WorkspaceTaskToolArgs {
     action: "list" | "create" | "update" | "conclude" | "delete";
     taskId?: string;
@@ -8,6 +14,7 @@ export interface WorkspaceTaskToolArgs {
     status?: TaskStatus;
     priority?: TaskPriority;
     assignee?: string;
+    tasks?: TaskCreateItem[];
     summary?: string;
     deliverables?: string[];
     insights?: string[];

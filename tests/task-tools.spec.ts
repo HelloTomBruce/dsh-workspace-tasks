@@ -93,5 +93,19 @@ describe("registerTaskTools", () => {
     expect(Array.isArray(rendered)).toBe(true);
     expect(rendered[0].type).toBe("text");
     expect(rendered[0].text).toContain("TASK-001");
+
+    // 5. Batch create tasks (AI decomposition simulation)
+    const batchRes = await registeredTool.execute({
+      action: "create",
+      tasks: [
+        { title: "Subtask 1: Parse schema", priority: "P0" },
+        { title: "Subtask 2: Generate types", priority: "P1" },
+      ],
+      workspacePath: mockWorkspace,
+    });
+    expect(batchRes.ok).toBe(true);
+    expect(batchRes.tasks.length).toBe(2);
+    expect(batchRes.tasks[0].id).toBe("TASK-002");
+    expect(batchRes.tasks[1].id).toBe("TASK-003");
   });
 });

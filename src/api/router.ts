@@ -75,20 +75,40 @@ export function registerTaskApis(ctx: Context): () => void {
           const raw = await readBody(req);
           const body = parseJsonBody<{
             workspacePath?: string;
-            title: string;
+            title?: string;
             description?: string;
             priority?: TaskPriority;
             assignee?: string;
             sessionId?: string;
+            tasks?: Array<{
+              title: string;
+              description?: string;
+              priority?: TaskPriority;
+              assignee?: string;
+              sessionId?: string;
+            }>;
           }>(raw);
 
-          if (!body || !body.title) {
-            sendJson(res, 400, { ok: false, error: "Missing required 'title'" });
+          const workspacePath = body?.workspacePath || process.cwd();
+
+          if (Array.isArray(body?.tasks) && body.tasks.length > 0) {
+            const created = await TaskStore.createTasks(workspacePath, body.tasks);
+            sendJson(res, 200, { ok: true, data: created });
             return;
           }
 
-          const workspacePath = body.workspacePath || process.cwd();
-          const task = await TaskStore.createTask(workspacePath, body);
+          if (!body || !body.title) {
+            sendJson(res, 400, { ok: false, error: "Missing required 'title' or 'tasks'" });
+            return;
+          }
+
+          const task = await TaskStore.createTask(workspacePath, {
+            title: body.title,
+            description: body.description,
+            priority: body.priority,
+            assignee: body.assignee,
+            sessionId: body.sessionId,
+          });
           sendJson(res, 200, { ok: true, data: task });
           return;
         }

@@ -112,6 +112,56 @@ export class TaskStore {
     };
   }
 
+  static async createTasks(
+    workspacePath: string,
+    items: Array<{
+      title: string;
+      description?: string;
+      priority?: TaskPriority;
+      assignee?: string;
+      sessionId?: string;
+    }>
+  ): Promise<ProjectTask[]> {
+    if (!items || items.length === 0) return [];
+    const doc = await this.load(workspacePath);
+    let maxNum = doc.tasks.reduce((max, t) => {
+      const match = t.id.match(/^TASK-(\d+)$/);
+      if (match && match[1]) {
+        const num = parseInt(match[1], 10);
+        return num > max ? num : max;
+      }
+      return max;
+    }, 0);
+
+    const created: ProjectTask[] = [];
+    const now = new Date().toISOString();
+
+    for (const params of items) {
+      if (!params.title || !params.title.trim()) continue;
+      maxNum++;
+      const nextId = `TASK-${String(maxNum).padStart(3, "0")}`;
+      const newTask: ProjectTask = {
+        id: nextId,
+        title: params.title.trim(),
+        description: params.description?.trim() || "",
+        status: "todo",
+        priority: params.priority || "P1",
+        assignee: params.assignee || "agent",
+        createdAt: now,
+        updatedAt: now,
+        sessionId: params.sessionId,
+        conclusions: [],
+      };
+      created.push(newTask);
+    }
+
+    if (created.length > 0) {
+      doc.tasks.unshift(...created);
+      await this.save(workspacePath, doc);
+    }
+    return created;
+  }
+
   static async createTask(
     workspacePath: string,
     params: {
@@ -122,35 +172,11 @@ export class TaskStore {
       sessionId?: string;
     }
   ): Promise<ProjectTask> {
-    const doc = await this.load(workspacePath);
-    const maxNum = doc.tasks.reduce((max, t) => {
-      const match = t.id.match(/^TASK-(\d+)$/);
-      if (match && match[1]) {
-        const num = parseInt(match[1], 10);
-        return num > max ? num : max;
-      }
-      return max;
-    }, 0);
-
-    const nextId = `TASK-${String(maxNum + 1).padStart(3, "0")}`;
-    const now = new Date().toISOString();
-
-    const newTask: ProjectTask = {
-      id: nextId,
-      title: params.title.trim(),
-      description: params.description?.trim() || "",
-      status: "todo",
-      priority: params.priority || "P1",
-      assignee: params.assignee || "agent",
-      createdAt: now,
-      updatedAt: now,
-      sessionId: params.sessionId,
-      conclusions: [],
-    };
-
-    doc.tasks.unshift(newTask);
-    await this.save(workspacePath, doc);
-    return newTask;
+    const list = await this.createTasks(workspacePath, [params]);
+    if (!list[0]) {
+      throw new Error("Task title cannot be empty");
+    }
+    return list[0];
   }
 
   static async updateTask(

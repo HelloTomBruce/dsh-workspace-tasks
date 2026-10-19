@@ -16,6 +16,13 @@ export declare class TaskStore {
         tasks: ProjectTask[];
         summary: WorkspaceTasksSummary;
     }>;
+    static createTasks(workspacePath: string, items: Array<{
+        title: string;
+        description?: string;
+        priority?: TaskPriority;
+        assignee?: string;
+        sessionId?: string;
+    }>): Promise<ProjectTask[]>;
     static createTask(workspacePath: string, params: {
         title: string;
         description?: string;

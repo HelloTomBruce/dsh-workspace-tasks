@@ -87,6 +87,25 @@ describe("TaskStore", () => {
     expect(summary.done).toBe(1);
   });
 
+  it("should support batch creating tasks via createTasks", async () => {
+    const created = await TaskStore.createTasks(mockWorkspace, [
+      { title: "Design DB schema", priority: "P0" },
+      { title: "Implement API", priority: "P1" },
+      { title: "Write tests", priority: "P2" },
+    ]);
+
+    expect(created.length).toBe(3);
+    expect(created[0]?.id).toBe("TASK-001");
+    expect(created[1]?.id).toBe("TASK-002");
+    expect(created[2]?.id).toBe("TASK-003");
+
+    const { tasks, summary } = await TaskStore.listTasks(mockWorkspace);
+    expect(summary.total).toBe(3);
+    expect(tasks[0]?.id).toBe("TASK-001");
+    expect(tasks[1]?.id).toBe("TASK-002");
+    expect(tasks[2]?.id).toBe("TASK-003");
+  });
+
   it("should delete task", async () => {
     const task = await TaskStore.createTask(mockWorkspace, { title: "Temporary task" });
     const deleted = await TaskStore.deleteTask(mockWorkspace, task.id);
