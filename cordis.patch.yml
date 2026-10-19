@@ -1,0 +1,4 @@
+# dsh-workspace-tasks bundle layer
+- insert:
+    - id: workspace-tasks
+      name: 'dsh-workspace-tasks'

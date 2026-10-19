@@ -1,0 +1,216 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import type {
+  ProjectTask,
+  TaskConclusion,
+  TaskPriority,
+  TaskStatus,
+  WorkspaceTasksDocument,
+  WorkspaceTasksSummary,
+} from "./types.ts";
+
+/**
+ * 获取本地持久化根目录：统一存放在用户本地 ~/.dsh/storages/workspace-tasks/，
+ * 绝不污染用户代码仓库，也绝不参与 Git 跟踪与提交。
+ */
+export function getStorageDir(): string {
+  return (
+    process.env.DSH_TASKS_STORAGE_DIR ||
+    path.join(os.homedir(), ".dsh", "storages", "workspace-tasks")
+  );
+}
+
+/**
+ * 根据工作区绝对路径生成唯一的本地存储文件名。
+ * 格式形如：<工作区文件夹名>-<sha256前8位>.json
+ */
+export function getTasksFilePath(workspacePath: string): string {
+  const normalized = path.resolve(workspacePath);
+  const base = path.basename(normalized) || "root";
+  const hash = crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 8);
+  const safeName = `${base.replace(/[^a-zA-Z0-9_\-\.]/g, "_")}-${hash}.json`;
+  return path.join(getStorageDir(), safeName);
+}
+
+function computeSummary(tasks: readonly ProjectTask[]): WorkspaceTasksSummary {
+  let todo = 0;
+  let inProgress = 0;
+  let review = 0;
+  let done = 0;
+  let blocked = 0;
+
+  for (const t of tasks) {
+    switch (t.status) {
+      case "todo":
+        todo++;
+        break;
+      case "in_progress":
+        inProgress++;
+        break;
+      case "review":
+        review++;
+        break;
+      case "done":
+        done++;
+        break;
+      case "blocked":
+        blocked++;
+        break;
+    }
+  }
+
+  return {
+    total: tasks.length,
+    todo,
+    inProgress,
+    review,
+    done,
+    blocked,
+  };
+}
+
+export class TaskStore {
+  static async load(workspacePath: string): Promise<WorkspaceTasksDocument> {
+    const filePath = getTasksFilePath(workspacePath);
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      const doc = JSON.parse(raw) as WorkspaceTasksDocument;
+      return {
+        version: doc.version ?? 1,
+        workspacePath,
+        tasks: Array.isArray(doc.tasks) ? doc.tasks : [],
+        updatedAt: doc.updatedAt ?? new Date().toISOString(),
+      };
+    } catch {
+      return {
+        version: 1,
+        workspacePath,
+        tasks: [],
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  static async save(workspacePath: string, doc: WorkspaceTasksDocument): Promise<void> {
+    const filePath = getTasksFilePath(workspacePath);
+    const dir = path.dirname(filePath);
+    await fs.mkdir(dir, { recursive: true });
+    doc.updatedAt = new Date().toISOString();
+    await fs.writeFile(filePath, JSON.stringify(doc, null, 2), "utf-8");
+  }
+
+  static async listTasks(workspacePath: string): Promise<{
+    tasks: ProjectTask[];
+    summary: WorkspaceTasksSummary;
+  }> {
+    const doc = await this.load(workspacePath);
+    return {
+      tasks: doc.tasks,
+      summary: computeSummary(doc.tasks),
+    };
+  }
+
+  static async createTask(
+    workspacePath: string,
+    params: {
+      title: string;
+      description?: string;
+      priority?: TaskPriority;
+      assignee?: string;
+      sessionId?: string;
+    }
+  ): Promise<ProjectTask> {
+    const doc = await this.load(workspacePath);
+    const maxNum = doc.tasks.reduce((max, t) => {
+      const match = t.id.match(/^TASK-(\d+)$/);
+      if (match && match[1]) {
+        const num = parseInt(match[1], 10);
+        return num > max ? num : max;
+      }
+      return max;
+    }, 0);
+
+    const nextId = `TASK-${String(maxNum + 1).padStart(3, "0")}`;
+    const now = new Date().toISOString();
+
+    const newTask: ProjectTask = {
+      id: nextId,
+      title: params.title.trim(),
+      description: params.description?.trim() || "",
+      status: "todo",
+      priority: params.priority || "P1",
+      assignee: params.assignee || "agent",
+      createdAt: now,
+      updatedAt: now,
+      sessionId: params.sessionId,
+      conclusions: [],
+    };
+
+    doc.tasks.unshift(newTask);
+    await this.save(workspacePath, doc);
+    return newTask;
+  }
+
+  static async updateTask(
+    workspacePath: string,
+    taskId: string,
+    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "assignee">>
+  ): Promise<ProjectTask | null> {
+    const doc = await this.load(workspacePath);
+    const task = doc.tasks.find((t) => t.id === taskId);
+    if (!task) return null;
+
+    if (patch.title !== undefined) task.title = patch.title.trim();
+    if (patch.description !== undefined) task.description = patch.description.trim();
+    if (patch.status !== undefined) task.status = patch.status;
+    if (patch.priority !== undefined) task.priority = patch.priority;
+    if (patch.assignee !== undefined) task.assignee = patch.assignee;
+
+    task.updatedAt = new Date().toISOString();
+    await this.save(workspacePath, doc);
+    return task;
+  }
+
+  static async addConclusion(
+    workspacePath: string,
+    taskId: string,
+    conclusion: {
+      summary: string;
+      deliverables?: string[];
+      insights?: string[];
+      sessionId?: string;
+    }
+  ): Promise<ProjectTask | null> {
+    const doc = await this.load(workspacePath);
+    const task = doc.tasks.find((t) => t.id === taskId);
+    if (!task) return null;
+
+    const newConclusion: TaskConclusion = {
+      id: `CONC-${Date.now()}`,
+      summary: conclusion.summary.trim(),
+      deliverables: conclusion.deliverables ?? [],
+      insights: conclusion.insights ?? [],
+      completedAt: new Date().toISOString(),
+      sessionId: conclusion.sessionId ?? task.sessionId,
+    };
+
+    task.conclusions.unshift(newConclusion);
+    task.status = "done";
+    task.updatedAt = new Date().toISOString();
+
+    await this.save(workspacePath, doc);
+    return task;
+  }
+
+  static async deleteTask(workspacePath: string, taskId: string): Promise<boolean> {
+    const doc = await this.load(workspacePath);
+    const initialLen = doc.tasks.length;
+    doc.tasks = doc.tasks.filter((t) => t.id !== taskId);
+    if (doc.tasks.length === initialLen) return false;
+
+    await this.save(workspacePath, doc);
+    return true;
+  }
+}
