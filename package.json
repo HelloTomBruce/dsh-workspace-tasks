@@ -74,5 +74,8 @@
       ],
       "platform": "web"
     }
+  },
+  "dependencies": {
+    "marked": "^18.1.1"
   }
 }
