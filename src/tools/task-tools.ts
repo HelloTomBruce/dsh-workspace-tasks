@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import { TaskStore } from "../store/task-store.ts";
 import type { TaskPriority, TaskStatus } from "../store/types.ts";
@@ -147,7 +148,7 @@ export function registerTaskTools(ctx: Context): () => void {
           },
           workspacePath: {
             type: "string",
-            description: "Optional workspace root directory (defaults to current working directory)",
+            description: "Optional workspace root directory. Defaults to the current session's workspace directory.",
           },
         },
         required: ["action"],
@@ -164,8 +165,10 @@ export function registerTaskTools(ctx: Context): () => void {
         ],
       },
       isConcurrencySafe: () => false,
-      async execute(args: WorkspaceTaskToolArgs) {
-        const cwd = args.workspacePath || process.cwd();
+      async execute(args: WorkspaceTaskToolArgs, exec?: any) {
+        const sessionCwd = exec?.agent?.session?.header?.cwd;
+        const rawPath = args.workspacePath || sessionCwd || process.cwd();
+        const cwd = path.resolve(rawPath);
 
         switch (args.action) {
           case "list": {
@@ -173,6 +176,7 @@ export function registerTaskTools(ctx: Context): () => void {
             return {
               ok: true,
               action: "list",
+              workspacePath: cwd,
               summary: result.summary,
               tasks: result.tasks,
             };
@@ -184,7 +188,8 @@ export function registerTaskTools(ctx: Context): () => void {
               return {
                 ok: true,
                 action: "create",
-                message: `Batch created ${createdList.length} task(s): ${createdList.map((t) => `${t.id} ("${t.title}")`).join(", ")}`,
+                workspacePath: cwd,
+                message: `Batch created ${createdList.length} task(s) in ${cwd}: ${createdList.map((t) => `${t.id} ("${t.title}")`).join(", ")}`,
                 tasks: createdList,
               };
             }
@@ -199,7 +204,8 @@ export function registerTaskTools(ctx: Context): () => void {
             return {
               ok: true,
               action: "create",
-              message: `Created task ${task.id}: "${task.title}"`,
+              workspacePath: cwd,
+              message: `Created task ${task.id} in ${cwd}: "${task.title}"`,
               task,
             };
           }
@@ -213,10 +219,11 @@ export function registerTaskTools(ctx: Context): () => void {
               priority: args.priority,
               assignee: args.assignee,
             });
-            if (!task) throw new Error(`Task ${args.taskId} not found`);
+            if (!task) throw new Error(`Task ${args.taskId} not found in ${cwd}`);
             return {
               ok: true,
               action: "update",
+              workspacePath: cwd,
               message: `Updated task ${task.id} status to ${task.status}`,
               task,
             };
@@ -230,10 +237,11 @@ export function registerTaskTools(ctx: Context): () => void {
               deliverables: args.deliverables,
               insights: args.insights,
             });
-            if (!task) throw new Error(`Task ${args.taskId} not found`);
+            if (!task) throw new Error(`Task ${args.taskId} not found in ${cwd}`);
             return {
               ok: true,
               action: "conclude",
+              workspacePath: cwd,
               message: `Concluded task ${task.id} successfully with conclusion record`,
               task,
             };
@@ -245,7 +253,8 @@ export function registerTaskTools(ctx: Context): () => void {
             return {
               ok: success,
               action: "delete",
-              message: success ? `Deleted task ${args.taskId}` : `Task ${args.taskId} not found`,
+              workspacePath: cwd,
+              message: success ? `Deleted task ${args.taskId} from ${cwd}` : `Task ${args.taskId} not found in ${cwd}`,
             };
           }
 

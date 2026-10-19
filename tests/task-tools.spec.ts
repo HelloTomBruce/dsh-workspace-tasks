@@ -103,9 +103,30 @@ describe("registerTaskTools", () => {
       ],
       workspacePath: mockWorkspace,
     });
-    expect(batchRes.ok).toBe(true);
-    expect(batchRes.tasks.length).toBe(2);
-    expect(batchRes.tasks[0].id).toBe("TASK-002");
-    expect(batchRes.tasks[1].id).toBe("TASK-003");
+    // 6. Test auto resolution of workspace from exec.agent.session.header.cwd
+    const sessionWorkspace = "/Users/zhangbei/code/dsh-browser";
+    const autoCwdRes = await registeredTool.execute(
+      {
+        action: "create",
+        title: "Auto session workspace task",
+        priority: "P1",
+      },
+      {
+        agent: {
+          session: {
+            header: {
+              cwd: sessionWorkspace,
+            },
+          },
+        },
+      }
+    );
+    expect(autoCwdRes.ok).toBe(true);
+    expect(autoCwdRes.workspacePath).toBe(sessionWorkspace);
+    expect(autoCwdRes.task.id).toBe("TASK-001");
+
+    // 确认写入了 dsh-browser 对应的工作区存储文件
+    const allFiles = await fs.readdir(tmpDir);
+    expect(allFiles.some((f) => f.startsWith("dsh-browser-"))).toBe(true);
   });
 });

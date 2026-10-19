@@ -4,6 +4,12 @@ export interface ActiveWorkspaceInfo {
     path: string;
     title: string;
 }
+export declare function findBestMatchingWorkspace(items: Array<{
+    workspaceId: string;
+    path: string;
+    title: string;
+    sessionIds?: string[];
+}>, targetPath?: string): ActiveWorkspaceInfo | null;
 export declare function resolveActiveWorkspace(explicitSessionId?: string, explicitWorkspacePath?: string): ActiveWorkspaceInfo;
 export declare function useActiveWorkspace(explicitSessionId?: string, explicitWorkspacePath?: string): ActiveWorkspaceInfo;
 export declare function TaskPanelTitle(props?: {

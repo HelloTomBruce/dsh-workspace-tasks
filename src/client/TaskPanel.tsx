@@ -20,6 +20,41 @@ export interface ActiveWorkspaceInfo {
   title: string;
 }
 
+export function findBestMatchingWorkspace(
+  items: Array<{
+    workspaceId: string;
+    path: string;
+    title: string;
+    sessionIds?: string[];
+  }>,
+  targetPath?: string
+): ActiveWorkspaceInfo | null {
+  if (!targetPath || !items || items.length === 0) return null;
+  const normalizedTarget = targetPath.replace(/[/\\]+$/, "");
+
+  // 1. 精确路径匹配优先（防止子目录被父级目录误匹配）
+  const exact = items.find((w) => w.path.replace(/[/\\]+$/, "") === normalizedTarget);
+  if (exact) {
+    return { id: exact.workspaceId, path: exact.path, title: exact.title || exact.path };
+  }
+
+  // 2. 最长前缀匹配（必须带路径分隔符边界，按路径长度降序优先匹配最深层子工作区）
+  const prefixMatches = items.filter((w) => {
+    const wPath = w.path.replace(/[/\\]+$/, "");
+    return normalizedTarget.startsWith(wPath + "/") || normalizedTarget.startsWith(wPath + "\\");
+  });
+
+  if (prefixMatches.length > 0) {
+    prefixMatches.sort((a, b) => b.path.length - a.path.length);
+    const best = prefixMatches[0];
+    if (best) {
+      return { id: best.workspaceId, path: best.path, title: best.title || best.path };
+    }
+  }
+
+  return null;
+}
+
 export function resolveActiveWorkspace(
   explicitSessionId?: string,
   explicitWorkspacePath?: string
@@ -38,14 +73,10 @@ export function resolveActiveWorkspace(
       updatedAt?: string;
     }> = workspacesState?.items ?? [];
 
-    // 0. 如果显式指定了有效的工作区路径，优先按路径解析
+    // 0. 如果显式指定了有效的工作区路径，优先按精准/最长前缀路径解析
     if (explicitWorkspacePath) {
-      const match = items.find(
-        (w) => w.path === explicitWorkspacePath || explicitWorkspacePath.startsWith(w.path)
-      );
-      if (match) {
-        return { id: match.workspaceId, path: match.path, title: match.title || match.path };
-      }
+      const match = findBestMatchingWorkspace(items, explicitWorkspacePath);
+      if (match) return match;
       const title = explicitWorkspacePath.split("/").filter(Boolean).pop() || explicitWorkspacePath;
       return { id: undefined, path: explicitWorkspacePath, title };
     }
@@ -110,14 +141,8 @@ export function resolveActiveWorkspace(
       // 2.2 检查 sessionsState.byId[sid]?.cwd 是否匹配某个 workspace
       const sessionCwd = sessionsState?.byId?.[sid]?.cwd;
       if (sessionCwd) {
-        if (items.length > 0) {
-          const found = items.find(
-            (w) => w.path === sessionCwd || sessionCwd.startsWith(w.path)
-          );
-          if (found) {
-            return { id: found.workspaceId, path: found.path, title: found.title || found.path };
-          }
-        }
+        const matched = findBestMatchingWorkspace(items, sessionCwd);
+        if (matched) return matched;
         const title = sessionCwd.split("/").filter(Boolean).pop() || sessionCwd;
         return { id: undefined, path: sessionCwd, title };
       }
