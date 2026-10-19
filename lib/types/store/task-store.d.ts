@@ -37,6 +37,7 @@ export declare class TaskStore {
         insights?: string[];
         sessionId?: string;
     }): Promise<ProjectTask | null>;
+    static archiveTask(workspacePath: string, taskId: string): Promise<ProjectTask | null>;
     static deleteTask(workspacePath: string, taskId: string): Promise<boolean>;
 }
 //# sourceMappingURL=task-store.d.ts.map

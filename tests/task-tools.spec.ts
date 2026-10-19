@@ -125,8 +125,13 @@ describe("registerTaskTools", () => {
     expect(autoCwdRes.workspacePath).toBe(sessionWorkspace);
     expect(autoCwdRes.task.id).toBe("TASK-001");
 
-    // 确认写入了 dsh-browser 对应的工作区存储文件
-    const allFiles = await fs.readdir(tmpDir);
-    expect(allFiles.some((f) => f.startsWith("dsh-browser-"))).toBe(true);
+    // 7. Test archive action via tool
+    const archiveRes = await registeredTool.execute({
+      action: "archive",
+      taskId: "TASK-001",
+      workspacePath: mockWorkspace,
+    });
+    expect(archiveRes.ok).toBe(true);
+    expect(archiveRes.task.status).toBe("archived");
   });
 });

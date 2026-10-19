@@ -106,6 +106,20 @@ describe("TaskStore", () => {
     expect(tasks[2]?.id).toBe("TASK-003");
   });
 
+  it("should archive task and exclude from active total summary", async () => {
+    const task = await TaskStore.createTask(mockWorkspace, { title: "Completed task" });
+    await TaskStore.updateTask(mockWorkspace, task.id, { status: "done" });
+    const archived = await TaskStore.archiveTask(mockWorkspace, task.id);
+
+    expect(archived).not.toBeNull();
+    expect(archived?.status).toBe("archived");
+
+    const { summary } = await TaskStore.listTasks(mockWorkspace);
+    expect(summary.total).toBe(0); // Active total excludes archived
+    expect(summary.archived).toBe(1);
+    expect(summary.done).toBe(0);
+  });
+
   it("should delete task", async () => {
     const task = await TaskStore.createTask(mockWorkspace, { title: "Temporary task" });
     const deleted = await TaskStore.deleteTask(mockWorkspace, task.id);

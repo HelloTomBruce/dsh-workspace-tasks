@@ -40,6 +40,7 @@ function computeSummary(tasks: readonly ProjectTask[]): WorkspaceTasksSummary {
   let review = 0;
   let done = 0;
   let blocked = 0;
+  let archived = 0;
 
   for (const t of tasks) {
     switch (t.status) {
@@ -58,16 +59,20 @@ function computeSummary(tasks: readonly ProjectTask[]): WorkspaceTasksSummary {
       case "blocked":
         blocked++;
         break;
+      case "archived":
+        archived++;
+        break;
     }
   }
 
   return {
-    total: tasks.length,
+    total: tasks.length - archived,
     todo,
     inProgress,
     review,
     done,
     blocked,
+    archived,
   };
 }
 
@@ -228,6 +233,10 @@ export class TaskStore {
 
     await this.save(workspacePath, doc);
     return task;
+  }
+
+  static async archiveTask(workspacePath: string, taskId: string): Promise<ProjectTask | null> {
+    return this.updateTask(workspacePath, taskId, { status: "archived" });
   }
 
   static async deleteTask(workspacePath: string, taskId: string): Promise<boolean> {

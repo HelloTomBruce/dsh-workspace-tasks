@@ -416,6 +416,7 @@ function useTasks(workspacePath: string): {
     review: 0,
     done: 0,
     blocked: 0,
+    archived: 0,
   });
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
@@ -434,7 +435,7 @@ function useTasks(workspacePath: string): {
           setSummary(res.data.summary);
         } else {
           setTasks([]);
-          setSummary({ total: 0, todo: 0, inProgress: 0, review: 0, done: 0, blocked: 0 });
+          setSummary({ total: 0, todo: 0, inProgress: 0, review: 0, done: 0, blocked: 0, archived: 0 });
         }
       })
       .catch((err) => {
@@ -511,7 +512,7 @@ export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => a
     dshCtx?.workspaces?.list?.getSnapshot?.()?.items ?? [];
 
   const filteredTasks = tasks.filter((t) => {
-    if (filter === "all") return true;
+    if (filter === "all") return t.status !== "archived";
     return t.status === filter;
   });
 
@@ -674,6 +675,7 @@ export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => a
         { key: "review", label: `审查 (${summary.review})` },
         { key: "done", label: `已完成 (${summary.done})` },
         { key: "blocked", label: `阻塞 (${summary.blocked})` },
+        { key: "archived", label: `已归档 (${summary.archived ?? 0})` },
       ].map((tab) =>
         createElement(
           "button",
@@ -695,7 +697,11 @@ export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => a
         ? createElement(
             "div",
             { style: emptyStyle },
-            loading ? "加载任务中…" : "暂无相关任务，点击右上角【新建任务】开始"
+            loading
+              ? "加载任务中…"
+              : filter === "archived"
+              ? "暂无已归档任务"
+              : "暂无相关任务，点击右上角【新建任务】开始"
           )
         : filteredTasks.map((task) =>
             createElement(TaskCard, {
@@ -741,6 +747,7 @@ const STATUS_OPTIONS: { id: TaskStatus; label: string; color: string; bg: string
   { id: "review", label: "审查中", color: "#7c3aed", bg: "rgba(124, 58, 237, 0.14)" },
   { id: "done", label: "已完成", color: "#059669", bg: "rgba(5, 150, 105, 0.14)" },
   { id: "blocked", label: "已阻塞", color: "#dc2626", bg: "rgba(220, 38, 38, 0.14)" },
+  { id: "archived", label: "已归档", color: "#475569", bg: "rgba(71, 85, 105, 0.14)" },
 ];
 
 function StatusDropdown({
@@ -1097,6 +1104,7 @@ function TaskCard({
             : `📝 暂无结论 ${isExpanded ? "▲" : "▼"}`
         ),
         task.status !== "done" &&
+          task.status !== "archived" &&
           createElement(
             "button",
             {
@@ -1110,6 +1118,28 @@ function TaskCard({
               : assignedStatus === "filled"
               ? "✓ 已填入对话框"
               : "🤖 交给 Agent"
+          ),
+        task.status === "done" &&
+          createElement(
+            "button",
+            {
+              type: "button",
+              onClick: () => onStatusChange("archived"),
+              style: archiveBtnStyle,
+              title: "归档此任务，移出活跃任务列表，可在【已归档】中查看",
+            },
+            "📦 归档"
+          ),
+        task.status === "archived" &&
+          createElement(
+            "button",
+            {
+              type: "button",
+              onClick: () => onStatusChange("done"),
+              style: archiveBtnStyle,
+              title: "恢复任务到已完成状态",
+            },
+            "↩ 恢复"
           )
       ),
       createElement(
@@ -1583,6 +1613,21 @@ const assignBtnStyle = (active: boolean): CSSProperties => ({
   gap: "3px",
   transition: "all 0.15s ease",
 });
+
+const archiveBtnStyle: CSSProperties = {
+  background: "transparent",
+  border: "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
+  color: "var(--dsw-alias-label-secondary, #475569)",
+  borderRadius: "12px",
+  padding: "2px 8px",
+  fontSize: "11px",
+  fontWeight: "500",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "3px",
+  transition: "all 0.15s ease",
+};
 
 const timeStyle: CSSProperties = {
   fontSize: "11px",

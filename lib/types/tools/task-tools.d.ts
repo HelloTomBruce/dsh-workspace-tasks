@@ -7,7 +7,7 @@ export interface TaskCreateItem {
     assignee?: string;
 }
 export interface WorkspaceTaskToolArgs {
-    action: "list" | "create" | "update" | "conclude" | "delete";
+    action: "list" | "create" | "update" | "conclude" | "archive" | "delete";
     taskId?: string;
     title?: string;
     description?: string;

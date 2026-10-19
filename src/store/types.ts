@@ -1,4 +1,4 @@
-export type TaskStatus = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked';
+export type TaskStatus = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked' | 'archived';
 export type TaskPriority = 'P0' | 'P1' | 'P2';
 
 export interface TaskConclusion {
@@ -37,4 +37,5 @@ export interface WorkspaceTasksSummary {
   review: number;
   done: number;
   blocked: number;
+  archived: number;
 }

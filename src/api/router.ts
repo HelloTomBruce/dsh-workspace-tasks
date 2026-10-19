@@ -166,6 +166,23 @@ export function registerTaskApis(ctx: Context): () => void {
           return;
         }
 
+        if (pathname === `${API_BASE}/archive` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{ workspacePath?: string; taskId: string }>(raw);
+          if (!body || !body.taskId) {
+            sendJson(res, 400, { ok: false, error: "Missing 'taskId'" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const task = await TaskStore.archiveTask(workspacePath, body.taskId);
+          if (!task) {
+            sendJson(res, 404, { ok: false, error: "Task not found" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: task });
+          return;
+        }
+
         if (pathname === `${API_BASE}/delete` && req.method === "POST") {
           const raw = await readBody(req);
           const body = parseJsonBody<{ workspacePath?: string; taskId: string }>(raw);
