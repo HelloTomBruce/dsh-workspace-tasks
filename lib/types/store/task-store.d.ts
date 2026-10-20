@@ -22,6 +22,7 @@ export declare class TaskStore {
         priority?: TaskPriority;
         assignee?: string;
         sessionId?: string;
+        dependsOn?: string[];
     }>): Promise<ProjectTask[]>;
     static createTask(workspacePath: string, params: {
         title: string;
@@ -29,8 +30,9 @@ export declare class TaskStore {
         priority?: TaskPriority;
         assignee?: string;
         sessionId?: string;
+        dependsOn?: string[];
     }): Promise<ProjectTask>;
-    static updateTask(workspacePath: string, taskId: string, patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "assignee">>): Promise<ProjectTask | null>;
+    static updateTask(workspacePath: string, taskId: string, patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "assignee" | "dependsOn" | "sessionId">>): Promise<ProjectTask | null>;
     static addConclusion(workspacePath: string, taskId: string, conclusion: {
         summary: string;
         deliverables?: string[];

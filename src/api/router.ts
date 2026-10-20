@@ -80,12 +80,14 @@ export function registerTaskApis(ctx: Context): () => void {
             priority?: TaskPriority;
             assignee?: string;
             sessionId?: string;
+            dependsOn?: string[];
             tasks?: Array<{
               title: string;
               description?: string;
               priority?: TaskPriority;
               assignee?: string;
               sessionId?: string;
+              dependsOn?: string[];
             }>;
           }>(raw);
 
@@ -108,6 +110,7 @@ export function registerTaskApis(ctx: Context): () => void {
             priority: body.priority,
             assignee: body.assignee,
             sessionId: body.sessionId,
+            dependsOn: body.dependsOn,
           });
           sendJson(res, 200, { ok: true, data: task });
           return;
@@ -123,6 +126,8 @@ export function registerTaskApis(ctx: Context): () => void {
             status?: TaskStatus;
             priority?: TaskPriority;
             assignee?: string;
+            sessionId?: string;
+            dependsOn?: string[];
           }>(raw);
 
           if (!body || !body.taskId) {

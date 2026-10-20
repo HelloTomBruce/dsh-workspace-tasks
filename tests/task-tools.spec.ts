@@ -228,4 +228,52 @@ describe("registerTaskTools", () => {
     });
     expect(() => assertLosslessJson(deleteRes, "delete")).not.toThrow();
   });
+
+  it("should support dependsOn in create, batch create and update", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: {
+        register: (tool: any) => {
+          registeredTool = tool;
+          return () => {};
+        },
+      },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    const task1 = await registeredTool.execute({
+      action: "create",
+      title: "Step 1",
+      workspacePath: mockWorkspace,
+    });
+    const task2 = await registeredTool.execute({
+      action: "create",
+      title: "Step 2",
+      dependsOn: [task1.task.id],
+      workspacePath: mockWorkspace,
+    });
+
+    expect(task2.task.dependsOn).toEqual(["TASK-001"]);
+    expect(() => assertLosslessJson(task2, "createWithDeps")).not.toThrow();
+
+    const batchRes = await registeredTool.execute({
+      action: "create",
+      tasks: [
+        { title: "Step 3", dependsOn: [task1.task.id, task2.task.id] },
+      ],
+      workspacePath: mockWorkspace,
+    });
+    expect(batchRes.tasks[0].dependsOn).toEqual(["TASK-001", "TASK-002"]);
+    expect(() => assertLosslessJson(batchRes, "batchCreateWithDeps")).not.toThrow();
+
+    const updateRes = await registeredTool.execute({
+      action: "update",
+      taskId: "TASK-002",
+      dependsOn: [],
+      workspacePath: mockWorkspace,
+    });
+    expect(updateRes.task.dependsOn).toBeUndefined();
+    expect(() => assertLosslessJson(updateRes, "updateDeps")).not.toThrow();
+  });
 });

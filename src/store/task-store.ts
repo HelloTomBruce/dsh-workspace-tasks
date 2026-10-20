@@ -125,6 +125,7 @@ export class TaskStore {
       priority?: TaskPriority;
       assignee?: string;
       sessionId?: string;
+      dependsOn?: string[];
     }>
   ): Promise<ProjectTask[]> {
     if (!items || items.length === 0) return [];
@@ -145,6 +146,9 @@ export class TaskStore {
       if (!params.title || !params.title.trim()) continue;
       maxNum++;
       const nextId = `TASK-${String(maxNum).padStart(3, "0")}`;
+      const validDeps = Array.isArray(params.dependsOn)
+        ? Array.from(new Set(params.dependsOn.map((d) => d.trim()).filter((d) => Boolean(d) && d !== nextId)))
+        : [];
       const newTask: ProjectTask = {
         id: nextId,
         title: params.title.trim(),
@@ -152,6 +156,7 @@ export class TaskStore {
         status: "todo",
         priority: params.priority || "P1",
         assignee: params.assignee || "agent",
+        ...(validDeps.length > 0 ? { dependsOn: validDeps } : {}),
         createdAt: now,
         updatedAt: now,
         // 仅在确有值时写入：undefined 自有属性无法通过 harness 的 lossless-JSON 快照校验
@@ -176,6 +181,7 @@ export class TaskStore {
       priority?: TaskPriority;
       assignee?: string;
       sessionId?: string;
+      dependsOn?: string[];
     }
   ): Promise<ProjectTask> {
     const list = await this.createTasks(workspacePath, [params]);
@@ -188,7 +194,7 @@ export class TaskStore {
   static async updateTask(
     workspacePath: string,
     taskId: string,
-    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "assignee">>
+    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "assignee" | "dependsOn" | "sessionId">>
   ): Promise<ProjectTask | null> {
     const doc = await this.load(workspacePath);
     const task = doc.tasks.find((t) => t.id === taskId);
@@ -199,6 +205,23 @@ export class TaskStore {
     if (patch.status !== undefined) task.status = patch.status;
     if (patch.priority !== undefined) task.priority = patch.priority;
     if (patch.assignee !== undefined) task.assignee = patch.assignee;
+    if (patch.sessionId !== undefined) {
+      if (patch.sessionId) {
+        task.sessionId = patch.sessionId;
+      } else {
+        delete task.sessionId;
+      }
+    }
+    if (patch.dependsOn !== undefined) {
+      const validDeps = Array.isArray(patch.dependsOn)
+        ? Array.from(new Set(patch.dependsOn.map((d) => d.trim()).filter((d) => Boolean(d) && d !== taskId)))
+        : [];
+      if (validDeps.length > 0) {
+        task.dependsOn = validDeps;
+      } else {
+        delete task.dependsOn;
+      }
+    }
 
     task.updatedAt = new Date().toISOString();
     await this.save(workspacePath, doc);

@@ -32,6 +32,7 @@ export declare function TaskPanelTitle(props?: {
 export declare function TaskPanelBody(props?: {
     sessionId?: string;
     useTabInfo?: () => any;
+    openFile?: (path: string, workspacePath?: string) => Promise<void>;
 }): import("react").DetailedReactHTMLElement<{
     style: CSSProperties;
     onPointerDown: () => void;

@@ -5,6 +5,7 @@ export interface TaskCreateItem {
     description?: string;
     priority?: TaskPriority;
     assignee?: string;
+    dependsOn?: string[];
 }
 export interface WorkspaceTaskToolArgs {
     action: "list" | "create" | "update" | "conclude" | "archive" | "delete";
@@ -14,6 +15,7 @@ export interface WorkspaceTaskToolArgs {
     status?: TaskStatus;
     priority?: TaskPriority;
     assignee?: string;
+    dependsOn?: string[];
     tasks?: TaskCreateItem[];
     summary?: string;
     deliverables?: string[];

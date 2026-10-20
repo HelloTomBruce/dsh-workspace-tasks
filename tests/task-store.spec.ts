@@ -128,4 +128,39 @@ describe("TaskStore", () => {
     const { tasks } = await TaskStore.listTasks(mockWorkspace);
     expect(tasks.length).toBe(0);
   });
+
+  it("should create and update tasks with dependsOn dependencies", async () => {
+    const task1 = await TaskStore.createTask(mockWorkspace, { title: "Base module" });
+    const task2 = await TaskStore.createTask(mockWorkspace, {
+      title: "Dependent module",
+      dependsOn: [task1.id, "   ", task1.id], // 包含空格和重复项
+    });
+
+    expect(task2.dependsOn).toEqual([task1.id]);
+
+    const updated = await TaskStore.updateTask(mockWorkspace, task2.id, {
+      dependsOn: [task1.id, "TASK-999"],
+    });
+    expect(updated?.dependsOn).toEqual([task1.id, "TASK-999"]);
+
+    // 清空依赖
+    const cleared = await TaskStore.updateTask(mockWorkspace, task2.id, {
+      dependsOn: [],
+    });
+    expect(cleared?.dependsOn).toBeUndefined();
+  });
+
+  it("should update task sessionId via updateTask", async () => {
+    const task = await TaskStore.createTask(mockWorkspace, { title: "Session task" });
+    expect(task.sessionId).toBeUndefined();
+
+    const updated = await TaskStore.updateTask(mockWorkspace, task.id, {
+      sessionId: "session-xyz-123",
+    });
+    expect(updated?.sessionId).toBe("session-xyz-123");
+
+    const { tasks } = await TaskStore.listTasks(mockWorkspace);
+    const reloaded = tasks.find((t) => t.id === task.id);
+    expect(reloaded?.sessionId).toBe("session-xyz-123");
+  });
 });

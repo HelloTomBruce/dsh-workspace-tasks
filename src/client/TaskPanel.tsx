@@ -3,6 +3,7 @@ import type { CSSProperties, ChangeEvent } from "react";
 import { marked } from "marked";
 import type { ProjectTask, TaskPriority, TaskStatus, WorkspaceTasksSummary } from "../store/types.ts";
 import { PlusIcon, RefreshIcon, TaskTabIcon } from "./icons.tsx";
+import { findCurrentSession, openWorkspaceFileViaDsh } from "./dsh-open.ts";
 
 const API_BASE = "/__dsh-tasks__";
 
@@ -227,20 +228,15 @@ export function resolveActiveWorkspace(
     // 1. 搜集当前候选 Session ID（按优先级排序）
     const candidateSessionIds: string[] = [];
 
-    // 1.1 显式传入（例如 TaskPanel 组件接收到的 props.sessionId）
-    if (explicitSessionId) {
+    // 1.1 从 findCurrentSession 获取主视图活跃 Session
+    const activeSession = findCurrentSession(dshCtx);
+    if (activeSession?.sessionId && !candidateSessionIds.includes(activeSession.sessionId)) {
+      candidateSessionIds.push(activeSession.sessionId);
+    }
+
+    // 1.2 显式传入（例如 TaskPanel 组件接收到的 props.sessionId）
+    if (explicitSessionId && !candidateSessionIds.includes(explicitSessionId)) {
       candidateSessionIds.push(explicitSessionId);
-    }
-
-    // 1.2 从 uiWorkspace 获取（最准确的主视图当前会话）
-    const mainRefSessionId = dshCtx?.uiWorkspace?.mainReference?.sessionId;
-    if (mainRefSessionId && !candidateSessionIds.includes(mainRefSessionId)) {
-      candidateSessionIds.push(mainRefSessionId);
-    }
-
-    const selectionSessionId = dshCtx?.uiWorkspace?.selection?.getSnapshot?.()?.sessionId;
-    if (selectionSessionId && !candidateSessionIds.includes(selectionSessionId)) {
-      candidateSessionIds.push(selectionSessionId);
     }
 
     // 1.3 从 DOM 获取右侧栏当前会话标记: [data-sidebar-right-session]
@@ -498,7 +494,11 @@ export function TaskPanelTitle(props?: { sessionId?: string; useTabInfo?: () => 
   );
 }
 
-export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => any }) {
+export function TaskPanelBody(props?: {
+  sessionId?: string;
+  useTabInfo?: () => any;
+  openFile?: (path: string, workspacePath?: string) => Promise<void>;
+}) {
   const [manualWorkspacePath, setManualWorkspacePath] = useState<string | null>(null);
   const workspace = useActiveWorkspace(props?.sessionId, manualWorkspacePath || undefined);
   const { tasks, summary, loading, refresh } = useTasks(workspace.path);
@@ -508,8 +508,25 @@ export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => a
   const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
 
   const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
+  const activeSession = findCurrentSession(dshCtx);
+  const currentSessionId = props?.sessionId || activeSession?.sessionId;
+
   const allWorkspaces: Array<{ workspaceId: string; path: string; title: string }> =
     dshCtx?.workspaces?.list?.getSnapshot?.()?.items ?? [];
+
+  const tabInfo = typeof props?.useTabInfo === "function" ? props.useTabInfo() : null;
+  const tabActions = tabInfo?.tab?.actions;
+
+  const handleOpenFileProp = (path: string, wsPath?: string) => {
+    if (props?.openFile) {
+      return props.openFile(path, wsPath);
+    }
+    return openWorkspaceFileViaDsh(dshCtx, path, {
+      sessionId: currentSessionId,
+      workspacePath: wsPath || workspace.path,
+      tabActions,
+    });
+  };
 
   const filteredTasks = tasks.filter((t) => {
     if (filter === "all") return t.status !== "archived";
@@ -551,6 +568,20 @@ export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => a
       refresh();
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handleNavigateToTask = (targetId: string) => {
+    const el = document.getElementById(`task-card-${targetId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.style.transition = "box-shadow 0.3s ease, border-color 0.3s ease";
+      el.style.boxShadow = "0 0 0 3px rgba(37, 99, 235, 0.4)";
+      el.style.borderColor = "#2563eb";
+      setTimeout(() => {
+        el.style.boxShadow = "";
+        el.style.borderColor = "";
+      }, 1800);
     }
   };
 
@@ -707,14 +738,17 @@ export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => a
             createElement(TaskCard, {
               key: task.id,
               task,
+              allTasks: tasks,
               workspacePath: workspace.path,
               workspaceId: workspace.id,
-              currentSessionId: props?.sessionId,
+              currentSessionId,
               isExpanded: !!expandedTasks[task.id],
               onToggleExpand: () => toggleExpand(task.id),
               onStatusChange: (status) => updateStatus(task.id, status),
               onDelete: () => deleteTask(task.id),
               onConclusionAdded: refresh,
+              onNavigateToTask: handleNavigateToTask,
+              openFile: handleOpenFileProp,
             })
           )
     ),
@@ -723,6 +757,8 @@ export function TaskPanelBody(props?: { sessionId?: string; useTabInfo?: () => a
     showCreateModal &&
       createElement(CreateTaskModal, {
         workspacePath: workspace.path,
+        existingTasks: tasks,
+        sessionId: currentSessionId,
         onClose: () => setShowCreateModal(false),
         onCreated: () => {
           setShowCreateModal(false);
@@ -867,6 +903,7 @@ function StatusDropdown({
 
 function TaskCard({
   task,
+  allTasks = [],
   workspacePath,
   workspaceId,
   currentSessionId,
@@ -875,8 +912,11 @@ function TaskCard({
   onStatusChange,
   onDelete,
   onConclusionAdded,
+  onNavigateToTask,
+  openFile,
 }: {
   task: ProjectTask;
+  allTasks?: ProjectTask[];
   workspacePath: string;
   workspaceId?: string;
   currentSessionId?: string;
@@ -885,19 +925,107 @@ function TaskCard({
   onStatusChange: (status: TaskStatus) => void;
   onDelete: () => void;
   onConclusionAdded: () => void;
+  onNavigateToTask?: (taskId: string) => void;
+  openFile?: (path: string, workspacePath?: string) => Promise<void>;
 }) {
   const [showAddConc, setShowAddConc] = useState(false);
   const [concSummary, setConcSummary] = useState("");
   const [concDeliverables, setConcDeliverables] = useState("");
   const [concInsights, setConcInsights] = useState("");
   const [savingConc, setSavingConc] = useState(false);
-  const [assignedStatus, setAssignedStatus] = useState<"dispatched" | "filled" | null>(null);
+  const [assignedStatus, setAssignedStatus] = useState<"dispatched" | "failed" | null>(null);
+  const [openingFile, setOpeningFile] = useState<string | null>(null);
+  const [fileStatus, setFileStatus] = useState<Record<string, "opened" | "copied" | "missing" | "failed">>({});
+  const [linkedSessionId, setLinkedSessionId] = useState<string | null>(null);
+
+  // 计算前置依赖未完成项
+  const unmetDeps = (task.dependsOn ?? []).filter((depId) => {
+    const dep = allTasks.find((t) => t.id === depId);
+    return !dep || dep.status !== "done";
+  });
+  const hasUnmetDeps = unmetDeps.length > 0;
+
+  const handleOpenFile = async (relPath: string) => {
+    const cleanRel = relPath.trim();
+    if (!cleanRel) return;
+    setOpeningFile(cleanRel);
+
+    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
+    const absPath =
+      cleanRel.startsWith("/") || /^[A-Za-z]:[/\\]/.test(cleanRel) || cleanRel.startsWith("\\\\")
+        ? cleanRel
+        : workspacePath
+        ? `${workspacePath.replace(/[/\\]+$/, "")}/${cleanRel.replace(/^[/\\]+/, "")}`
+        : cleanRel;
+
+    let opened = false;
+
+    // 仅通过 DSH 官方体系打开（在 DSH 右侧栏打开文件预览/编辑 Tab）
+    try {
+      if (openFile) {
+        await openFile(cleanRel, workspacePath);
+        opened = true;
+      } else {
+        await openWorkspaceFileViaDsh(dshCtx, cleanRel, {
+          sessionId: currentSessionId,
+          workspacePath,
+        });
+        opened = true;
+      }
+    } catch (e) {
+      console.warn("[dsh-workspace-tasks] DSH openResource failed:", e);
+    }
+
+    if (opened) {
+      setFileStatus((prev) => ({ ...prev, [cleanRel]: "opened" }));
+    } else {
+      // 若 DSH 打开遇到异常，贴心复制路径到剪贴板兜底
+      try {
+        await navigator.clipboard.writeText(cleanRel);
+      } catch {}
+      setFileStatus((prev) => ({ ...prev, [cleanRel]: "failed" }));
+    }
+
+    setOpeningFile(null);
+    setTimeout(() => {
+      setFileStatus((prev) => {
+        const next = { ...prev };
+        delete next[cleanRel];
+        return next;
+      });
+    }, 2800);
+  };
+
+  const handleOpenSession = async (targetSessionId: string) => {
+    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
+    if (!targetSessionId) return;
+    try {
+      if (dshCtx?.uiWorkspace?.openSession) {
+        await dshCtx.uiWorkspace.openSession(targetSessionId);
+      } else if (dshCtx?.sessions?.open) {
+        await dshCtx.sessions.open(targetSessionId);
+      }
+    } catch (err) {
+      console.warn("Failed to open session:", err);
+    }
+  };
 
   const handleAssignToAgent = async () => {
+    if (hasUnmetDeps) {
+      const depNames = unmetDeps.join(", ");
+      const ok =
+        typeof window !== "undefined" &&
+        window.confirm(
+          `【依赖未完成提示】\n任务 [${task.id}] 的前置依赖 [${depNames}] 尚未完成。\n\n是否仍要强制派发给 Agent 执行？`
+        );
+      if (!ok) return;
+    }
+
     const prompt = [
       `请执行工作区任务 [${task.id}]：${task.title}`,
       workspacePath ? `【工作区根目录】：${workspacePath}` : "",
       task.description ? `\n【需求背景与详细要求】\n${task.description}` : "",
+      task.dependsOn && task.dependsOn.length > 0 ? `【前置依赖】：${task.dependsOn.join(", ")}` : "",
       `\n【执行规范与标准流程】`,
       `1. 开始执行时，先调用 workspace_task 工具（action: "update", taskId: "${task.id}", status: "in_progress", assignee: "agent"${workspacePath ? `, workspacePath: "${workspacePath}"` : ""}) 将本任务标记为进行中。`,
       `2. 完成代码实现与验证测试。`,
@@ -910,13 +1038,8 @@ function TaskCard({
 
     try {
       const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-      let targetSessionId = currentSessionId;
-
-      if (!targetSessionId && dshCtx) {
-        targetSessionId =
-          dshCtx.uiWorkspace?.mainReference?.sessionId ||
-          dshCtx.uiWorkspace?.selection?.getSnapshot?.()?.sessionId;
-      }
+      const activeSession = findCurrentSession(dshCtx);
+      let targetSessionId = currentSessionId || activeSession?.sessionId;
 
       if (!targetSessionId && typeof document !== "undefined") {
         targetSessionId =
@@ -970,44 +1093,29 @@ function TaskCard({
             console.warn("scopedCtx.conversation.send error", e);
           }
         }
+        if (dispatched) {
+          try {
+            await fetch(`${API_BASE}/update`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                workspacePath,
+                taskId: task.id,
+                sessionId: targetSessionId,
+              }),
+            });
+            onConclusionAdded();
+          } catch (e) {
+            console.warn("Failed to associate task with session", e);
+          }
+        }
       }
     } catch (err) {
-      console.warn("Direct dispatch to agent failed, falling back to editor/clipboard:", err);
+      console.warn("Direct dispatch to agent failed:", err);
     }
 
-    // 填入输入框，保证无论是否直派成功，用户都能在屏幕上即刻看到提示词
-    try {
-      // 1. Lexical contenteditable 输入区（DSH 主聊天区域）
-      const editableEl = document.querySelector<HTMLElement>('[contenteditable="true"]');
-      if (editableEl) {
-        editableEl.focus();
-        document.execCommand("selectAll", false, undefined);
-        document.execCommand("insertText", false, prompt);
-      }
-
-      // 2. 原生 textarea 兼容兜底
-      const textarea = document.querySelector<HTMLTextAreaElement>("textarea:not([disabled])");
-      if (textarea) {
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-        if (setter) {
-          setter.call(textarea, prompt);
-        } else {
-          textarea.value = prompt;
-        }
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        textarea.focus();
-      }
-    } catch (e) {
-      console.warn("Failed to set composer value:", e);
-    }
-
-    // 复制到剪贴板
-    try {
-      await navigator.clipboard.writeText(prompt);
-    } catch {}
-
-    setAssignedStatus(dispatched ? "dispatched" : "filled");
-    setTimeout(() => setAssignedStatus(null), 3500);
+    setAssignedStatus(dispatched ? "dispatched" : "failed");
+    setTimeout(() => setAssignedStatus(null), 3000);
   };
 
   const handleAddConclusion = async () => {
@@ -1023,6 +1131,10 @@ function TaskCard({
         .map((s) => s.trim())
         .filter(Boolean);
 
+      const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
+      const activeSession = findCurrentSession(dshCtx);
+      const concSessionId = currentSessionId || activeSession?.sessionId || task.sessionId;
+
       await fetch(`${API_BASE}/conclude`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1032,6 +1144,7 @@ function TaskCard({
           summary: concSummary,
           deliverables,
           insights,
+          ...(concSessionId ? { sessionId: concSessionId } : {}),
         }),
       });
 
@@ -1047,9 +1160,38 @@ function TaskCard({
     }
   };
 
+  const handleLinkCurrentSession = async () => {
+    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
+    const sid = currentSessionId || findCurrentSession(dshCtx)?.sessionId;
+    if (!sid) return;
+    setLinkedSessionId(sid);
+    try {
+      const res = await fetch(`${API_BASE}/update`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          workspacePath,
+          taskId: task.id,
+          sessionId: sid,
+        }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        throw new Error(data.error || "Update failed");
+      }
+      onConclusionAdded();
+    } catch (e) {
+      console.warn("Failed to link session:", e);
+      setLinkedSessionId(null);
+    }
+  };
+
+  const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
+  const effectiveSessionId = linkedSessionId || task.sessionId;
+
   return createElement(
     "div",
-    { style: taskCardStyle(task.status) },
+    { id: `task-card-${task.id}`, style: taskCardStyle(task.status) },
     // 卡片顶部条
     createElement(
       "div",
@@ -1059,7 +1201,30 @@ function TaskCard({
         { style: cardMetaStyle },
         createElement("span", { style: taskIdStyle }, task.id),
         createElement(PriorityBadge, { priority: task.priority }),
-        task.assignee && createElement("span", { style: assigneeBadgeStyle }, `@${task.assignee}`)
+        task.assignee && createElement("span", { style: assigneeBadgeStyle }, `@${task.assignee}`),
+        effectiveSessionId
+          ? createElement(
+              "button",
+              {
+                type: "button",
+                style: sessionBadgeStyle,
+                title: `点击跳转至关联会话: ${effectiveSessionId}`,
+                onClick: () => handleOpenSession(effectiveSessionId),
+              },
+              `💬 会话 #${effectiveSessionId.slice(-6)}`
+            )
+          : (currentSessionId || findCurrentSession(dshCtx)?.sessionId)
+          ? createElement(
+              "button",
+              {
+                type: "button",
+                style: linkSessionBtnStyle,
+                title: `点击将当前会话 (#${(currentSessionId || findCurrentSession(dshCtx)?.sessionId)!.slice(-6)}) 关联到此任务`,
+                onClick: handleLinkCurrentSession,
+              },
+              `+ 关联会话`
+            )
+          : null
       ),
       createElement(
         "div",
@@ -1079,6 +1244,36 @@ function TaskCard({
         )
       )
     ),
+
+    // 依赖关系展示条
+    task.dependsOn &&
+      task.dependsOn.length > 0 &&
+      createElement(
+        "div",
+        { style: depsRowStyle },
+        createElement(
+          "span",
+          { style: depsLabelStyle },
+          hasUnmetDeps ? "🔒 前置依赖:" : "✓ 依赖已就绪:"
+        ),
+        task.dependsOn.map((depId) => {
+          const dep = allTasks.find((t) => t.id === depId);
+          const isDone = dep?.status === "done";
+          return createElement(
+            "button",
+            {
+              type: "button",
+              key: depId,
+              style: depChipStyle(isDone),
+              title: dep
+                ? `[${dep.id}] ${dep.title} (${dep.status}) - 点击定位`
+                : `${depId} (未在列表中找到) - 点击定位`,
+              onClick: () => onNavigateToTask?.(depId),
+            },
+            isDone ? `✓ ${depId}` : `⏳ ${depId}`
+          );
+        })
+      ),
 
     // 标题
     createElement("div", { style: cardTitleStyle }, task.title),
@@ -1110,13 +1305,17 @@ function TaskCard({
             {
               type: "button",
               onClick: handleAssignToAgent,
-              style: assignBtnStyle(!!assignedStatus),
-              title: "一键将任务派发给 Agent 执行并填入对话框",
+              style: assignBtnStyle(assignedStatus),
+              title: hasUnmetDeps
+                ? `前置依赖 [${unmetDeps.join(", ")}] 尚未完成，点击可确认强制派发`
+                : "一键将任务派发给 Agent 执行",
             },
             assignedStatus === "dispatched"
-              ? "✓ 已直接派发"
-              : assignedStatus === "filled"
-              ? "✓ 已填入对话框"
+              ? "✓ 已发送给 Agent"
+              : assignedStatus === "failed"
+              ? "✕ 发送失败"
+              : hasUnmetDeps
+              ? "⚠️ 强制交给 Agent"
               : "🤖 交给 Agent"
           ),
         task.status === "done" &&
@@ -1160,8 +1359,23 @@ function TaskCard({
             { key: conc.id || idx, style: conclusionItemStyle },
             createElement(
               "div",
-              { style: concTimeStyle },
-              `完成于 ${new Date(conc.completedAt).toLocaleString()}`
+              { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 } },
+              createElement(
+                "span",
+                { style: concTimeStyle },
+                `完成于 ${new Date(conc.completedAt).toLocaleString()}`
+              ),
+              conc.sessionId &&
+                createElement(
+                  "button",
+                  {
+                    type: "button",
+                    style: sessionBadgeStyle,
+                    title: `点击跳转至生成此结论的会话: ${conc.sessionId}`,
+                    onClick: () => handleOpenSession(conc.sessionId!),
+                  },
+                  `💬 会话 #${conc.sessionId.slice(-6)}`
+                )
             ),
             createElement(MarkdownContent, { content: conc.summary, style: concSummaryStyle }),
             conc.deliverables &&
@@ -1169,13 +1383,50 @@ function TaskCard({
               createElement(
                 "div",
                 { style: concBlockStyle },
-                createElement("span", { style: concLabelStyle }, "产出交付物:"),
+                createElement("span", { style: concLabelStyle }, "产出交付物 (点击通过 DSH 打开):"),
                 createElement(
-                  "ul",
-                  { style: concListStyle },
-                  conc.deliverables.map((d, di) =>
-                    createElement("li", { key: di, style: codeLiStyle }, d)
-                  )
+                  "div",
+                  { style: { display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 } },
+                  conc.deliverables.map((d, di) => {
+                    const isOpening = openingFile === d;
+                    const status = fileStatus[d];
+                    return createElement(
+                      "button",
+                      {
+                        type: "button",
+                        key: di,
+                        style: deliverableLiStyle(status),
+                        title:
+                          status === "opened"
+                            ? `✓ 已在 DSH 侧边栏打开: ${d}`
+                            : status === "failed"
+                            ? `⚠️ DSH 打开未完成，已复制路径: ${d}`
+                            : status === "copied"
+                            ? `📋 已复制文件路径到剪贴板: ${d}`
+                            : `点击在 DSH 中预览/打开: ${d}`,
+                        onClick: () => handleOpenFile(d),
+                      },
+                      createElement(
+                        "span",
+                        { style: { marginRight: 4 } },
+                        isOpening ? "⏳" : status === "opened" ? "✓" : status === "failed" ? "⚠️" : status === "copied" ? "📋" : "📄"
+                      ),
+                      createElement("span", { style: deliverablePathStyle }, d),
+                      createElement(
+                        "span",
+                        { style: deliverableActionStyle(status) },
+                        isOpening
+                          ? "打开中…"
+                          : status === "opened"
+                          ? "已打开"
+                          : status === "failed"
+                          ? "打开失败(已复制)"
+                          : status === "copied"
+                          ? "已复制路径"
+                          : "↗ 打开"
+                      )
+                    );
+                  })
                 )
               ),
             conc.insights &&
@@ -1269,17 +1520,31 @@ const PRIORITIES: { id: TaskPriority; label: string; desc: string; color: string
 
 function CreateTaskModal({
   workspacePath,
+  existingTasks = [],
+  sessionId,
   onClose,
   onCreated,
 }: {
   workspacePath: string;
+  existingTasks?: ProjectTask[];
+  sessionId?: string;
   onClose: () => void;
   onCreated: () => void;
 }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<TaskPriority>("P1");
+  const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+
+  // 过滤出可作为依赖的前置任务（非归档）
+  const candidateTasks = existingTasks.filter((t) => t.status !== "archived");
+
+  const toggleDep = (taskId: string) => {
+    setSelectedDeps((prev) =>
+      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]
+    );
+  };
 
   const handleSubmit = async () => {
     if (!title.trim() || submitting) return;
@@ -1293,6 +1558,8 @@ function CreateTaskModal({
           title,
           description,
           priority,
+          dependsOn: selectedDeps,
+          ...(sessionId ? { sessionId } : {}),
         }),
       });
       onCreated();
@@ -1369,6 +1636,43 @@ function CreateTaskModal({
           })
         )
       ),
+      candidateTasks.length > 0 &&
+        createElement(
+          "div",
+          { style: { marginBottom: 14 } },
+          createElement("label", { style: fieldLabelStyle }, "前置依赖任务 (可选点击勾选)"),
+          createElement(
+            "div",
+            { style: { display: "flex", flexWrap: "wrap", gap: 6, maxHeight: "88px", overflowY: "auto", padding: "4px 0" } },
+            candidateTasks.map((ct) => {
+              const isChecked = selectedDeps.includes(ct.id);
+              return createElement(
+                "button",
+                {
+                  type: "button",
+                  key: ct.id,
+                  onClick: () => toggleDep(ct.id),
+                  style: {
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    padding: "3px 8px",
+                    borderRadius: "6px",
+                    fontSize: "11.5px",
+                    cursor: "pointer",
+                    border: isChecked ? "1px solid #2563eb" : "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
+                    background: isChecked ? "rgba(37, 99, 235, 0.1)" : "var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02))",
+                    color: isChecked ? "#2563eb" : "var(--dsw-alias-label-secondary, #475569)",
+                    transition: "all 0.15s ease",
+                  },
+                  title: `${ct.id}: ${ct.title} (${ct.status})`,
+                },
+                isChecked ? `✓ ${ct.id}` : `+ ${ct.id}`,
+                createElement("span", { style: { opacity: 0.75, maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, ct.title)
+              );
+            })
+          )
+        ),
       createElement(
         "div",
         { style: { marginBottom: 18 } },
@@ -1599,10 +1903,25 @@ const toggleExpandBtnStyle: CSSProperties = {
   fontWeight: "500",
 };
 
-const assignBtnStyle = (active: boolean): CSSProperties => ({
-  background: active ? "rgba(37, 99, 235, 0.12)" : "transparent",
-  border: active ? "1px solid #2563eb" : "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
-  color: active ? "#2563eb" : "var(--dsw-alias-label-secondary, #475569)",
+const assignBtnStyle = (status: "dispatched" | "failed" | null): CSSProperties => ({
+  background:
+    status === "dispatched"
+      ? "rgba(37, 99, 235, 0.12)"
+      : status === "failed"
+      ? "rgba(239, 68, 68, 0.12)"
+      : "transparent",
+  border:
+    status === "dispatched"
+      ? "1px solid #2563eb"
+      : status === "failed"
+      ? "1px solid #ef4444"
+      : "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
+  color:
+    status === "dispatched"
+      ? "#2563eb"
+      : status === "failed"
+      ? "#ef4444"
+      : "var(--dsw-alias-label-secondary, #475569)",
   borderRadius: "12px",
   padding: "2px 8px",
   fontSize: "11px",
@@ -1612,6 +1931,122 @@ const assignBtnStyle = (active: boolean): CSSProperties => ({
   alignItems: "center",
   gap: "3px",
   transition: "all 0.15s ease",
+});
+
+const sessionBadgeStyle: CSSProperties = {
+  background: "rgba(99, 102, 241, 0.1)",
+  border: "1px solid rgba(99, 102, 241, 0.25)",
+  color: "#6366f1",
+  borderRadius: "10px",
+  padding: "1px 6px",
+  fontSize: "10px",
+  fontWeight: "500",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "2px",
+  transition: "all 0.15s ease",
+};
+
+const linkSessionBtnStyle: CSSProperties = {
+  background: "transparent",
+  border: "1px dashed rgba(99, 102, 241, 0.35)",
+  color: "var(--dsw-alias-label-tertiary, #64748b)",
+  borderRadius: "10px",
+  padding: "1px 6px",
+  fontSize: "10px",
+  fontWeight: "500",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "2px",
+  transition: "all 0.15s ease",
+};
+
+const depsRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: "4px",
+  margin: "4px 0 6px 0",
+};
+
+const depsLabelStyle: CSSProperties = {
+  fontSize: "11px",
+  fontWeight: "500",
+  color: "var(--dsw-alias-label-secondary, #64748b)",
+  marginRight: "2px",
+};
+
+const depChipStyle = (isDone: boolean): CSSProperties => ({
+  background: isDone ? "rgba(16, 185, 129, 0.1)" : "rgba(245, 158, 11, 0.12)",
+  border: isDone ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(245, 158, 11, 0.35)",
+  color: isDone ? "#059669" : "#d97706",
+  borderRadius: "8px",
+  padding: "1px 6px",
+  fontSize: "10.5px",
+  fontWeight: "500",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "2px",
+  transition: "all 0.15s ease",
+});
+
+const deliverableLiStyle = (status?: "opened" | "copied" | "missing" | "failed"): CSSProperties => ({
+  fontFamily: "var(--dsw-alias-font-mono, monospace)",
+  fontSize: "11px",
+  color:
+    status === "opened"
+      ? "#059669"
+      : status === "failed" || status === "missing"
+      ? "#d97706"
+      : status === "copied"
+      ? "#2563eb"
+      : "var(--dsw-alias-brand-primary-new-colorprimary-new-color, #0284c7)",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "3px 8px",
+  borderRadius: "5px",
+  backgroundColor:
+    status === "opened"
+      ? "rgba(16, 185, 129, 0.12)"
+      : status === "failed" || status === "missing"
+      ? "rgba(245, 158, 11, 0.12)"
+      : status === "copied"
+      ? "rgba(37, 99, 235, 0.12)"
+      : "var(--dsw-alias-surface-elevation-1, rgba(0, 0, 0, 0.04))",
+  border:
+    status === "opened"
+      ? "1px solid rgba(16, 185, 129, 0.4)"
+      : status === "failed" || status === "missing"
+      ? "1px solid rgba(245, 158, 11, 0.4)"
+      : status === "copied"
+      ? "1px solid rgba(37, 99, 235, 0.4)"
+      : "1px solid var(--dsw-alias-border-subtle, rgba(0, 0, 0, 0.08))",
+  marginBottom: "4px",
+  marginRight: "4px",
+  transition: "all 0.18s ease",
+});
+
+const deliverablePathStyle: CSSProperties = {
+  wordBreak: "break-all",
+};
+
+const deliverableActionStyle = (status?: "opened" | "copied" | "missing" | "failed"): CSSProperties => ({
+  fontSize: "10px",
+  marginLeft: "6px",
+  opacity: 0.85,
+  fontWeight: status ? "600" : "400",
+  color:
+    status === "opened"
+      ? "#059669"
+      : status === "failed" || status === "missing"
+      ? "#d97706"
+      : status === "copied"
+      ? "#2563eb"
+      : "var(--dsw-alias-brand-primary-new-colorprimary-new-color, #2563eb)",
 });
 
 const archiveBtnStyle: CSSProperties = {
