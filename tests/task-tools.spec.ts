@@ -276,4 +276,78 @@ describe("registerTaskTools", () => {
     expect(updateRes.task.dependsOn).toBeUndefined();
     expect(() => assertLosslessJson(updateRes, "updateDeps")).not.toThrow();
   });
+
+  it("should support tags, get_ready_tasks and export_report actions", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: {
+        register: (tool: any) => {
+          registeredTool = tool;
+          return () => {};
+        },
+      },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    // 1. Create task with tags
+    const task1 = await registeredTool.execute({
+      action: "create",
+      title: "Build auth module",
+      tags: ["backend", "security"],
+      workspacePath: mockWorkspace,
+    });
+    expect(task1.task.tags).toEqual(["backend", "security"]);
+    expect(() => assertLosslessJson(task1, "createWithTags")).not.toThrow();
+
+    // 2. Create task2 depending on task1
+    const task2 = await registeredTool.execute({
+      action: "create",
+      title: "Write auth tests",
+      tags: ["test"],
+      dependsOn: [task1.task.id],
+      workspacePath: mockWorkspace,
+    });
+    expect(task2.task.tags).toEqual(["test"]);
+
+    // 3. get_ready_tasks (only task1 is ready)
+    const ready1 = await registeredTool.execute({
+      action: "get_ready_tasks",
+      workspacePath: mockWorkspace,
+    });
+    expect(ready1.ok).toBe(true);
+    expect(ready1.count).toBe(1);
+    expect(ready1.tasks[0].id).toBe(task1.task.id);
+    expect(() => assertLosslessJson(ready1, "ready1")).not.toThrow();
+
+    // 4. Conclude task1
+    await registeredTool.execute({
+      action: "conclude",
+      taskId: task1.task.id,
+      summary: "Auth module complete",
+      deliverables: ["src/auth.ts"],
+      insights: ["Always salt passwords"],
+      workspacePath: mockWorkspace,
+    });
+
+    // 5. get_ready_tasks (now task2 is ready)
+    const ready2 = await registeredTool.execute({
+      action: "get_ready_tasks",
+      workspacePath: mockWorkspace,
+    });
+    expect(ready2.count).toBe(1);
+    expect(ready2.tasks[0].id).toBe(task2.task.id);
+    expect(() => assertLosslessJson(ready2, "ready2")).not.toThrow();
+
+    // 6. export_report
+    const reportRes = await registeredTool.execute({
+      action: "export_report",
+      workspacePath: mockWorkspace,
+    });
+    expect(reportRes.ok).toBe(true);
+    expect(reportRes.report).toContain("工作区交付与工程总结报告");
+    expect(reportRes.report).toContain("src/auth.ts");
+    expect(reportRes.report).toContain("Always salt passwords");
+    expect(() => assertLosslessJson(reportRes, "exportReport")).not.toThrow();
+  });
 });

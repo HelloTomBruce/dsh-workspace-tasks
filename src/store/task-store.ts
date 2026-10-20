@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { getReadyTasks, generateWorkspaceSummaryReport } from "./pipeline.js";
 import type {
   ProjectTask,
   TaskConclusion,
@@ -123,6 +124,7 @@ export class TaskStore {
       title: string;
       description?: string;
       priority?: TaskPriority;
+      tags?: string[];
       assignee?: string;
       sessionId?: string;
       dependsOn?: string[];
@@ -149,12 +151,16 @@ export class TaskStore {
       const validDeps = Array.isArray(params.dependsOn)
         ? Array.from(new Set(params.dependsOn.map((d) => d.trim()).filter((d) => Boolean(d) && d !== nextId)))
         : [];
+      const validTags = Array.isArray(params.tags)
+        ? Array.from(new Set(params.tags.map((t) => t.trim()).filter(Boolean)))
+        : [];
       const newTask: ProjectTask = {
         id: nextId,
         title: params.title.trim(),
         description: params.description?.trim() || "",
         status: "todo",
         priority: params.priority || "P1",
+        ...(validTags.length > 0 ? { tags: validTags } : {}),
         assignee: params.assignee || "agent",
         ...(validDeps.length > 0 ? { dependsOn: validDeps } : {}),
         createdAt: now,
@@ -179,6 +185,7 @@ export class TaskStore {
       title: string;
       description?: string;
       priority?: TaskPriority;
+      tags?: string[];
       assignee?: string;
       sessionId?: string;
       dependsOn?: string[];
@@ -194,7 +201,7 @@ export class TaskStore {
   static async updateTask(
     workspacePath: string,
     taskId: string,
-    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "assignee" | "dependsOn" | "sessionId">>
+    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "tags" | "assignee" | "dependsOn" | "sessionId">>
   ): Promise<ProjectTask | null> {
     const doc = await this.load(workspacePath);
     const task = doc.tasks.find((t) => t.id === taskId);
@@ -205,6 +212,16 @@ export class TaskStore {
     if (patch.status !== undefined) task.status = patch.status;
     if (patch.priority !== undefined) task.priority = patch.priority;
     if (patch.assignee !== undefined) task.assignee = patch.assignee;
+    if (patch.tags !== undefined) {
+      const validTags = Array.isArray(patch.tags)
+        ? Array.from(new Set(patch.tags.map((t) => t.trim()).filter(Boolean)))
+        : [];
+      if (validTags.length > 0) {
+        task.tags = validTags;
+      } else {
+        delete task.tags;
+      }
+    }
     if (patch.sessionId !== undefined) {
       if (patch.sessionId) {
         task.sessionId = patch.sessionId;
@@ -273,5 +290,15 @@ export class TaskStore {
 
     await this.save(workspacePath, doc);
     return true;
+  }
+
+  static async getReadyTasks(workspacePath: string): Promise<ProjectTask[]> {
+    const doc = await this.load(workspacePath);
+    return getReadyTasks(doc.tasks);
+  }
+
+  static async exportSummaryReport(workspacePath: string): Promise<string> {
+    const doc = await this.load(workspacePath);
+    return generateWorkspaceSummaryReport(doc.tasks, workspacePath);
   }
 }

@@ -2,6 +2,7 @@ import { createElement, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ChangeEvent } from "react";
 import { marked } from "marked";
 import type { ProjectTask, TaskPriority, TaskStatus, WorkspaceTasksSummary } from "../store/types.ts";
+import { getReadyTasks, generateWorkspaceSummaryReport } from "../store/pipeline.ts";
 import { PlusIcon, RefreshIcon, TaskTabIcon } from "./icons.tsx";
 import { findCurrentSession, openWorkspaceFileViaDsh } from "./dsh-open.ts";
 
@@ -502,8 +503,11 @@ export function TaskPanelBody(props?: {
   const [manualWorkspacePath, setManualWorkspacePath] = useState<string | null>(null);
   const workspace = useActiveWorkspace(props?.sessionId, manualWorkspacePath || undefined);
   const { tasks, summary, loading, refresh } = useTasks(workspace.path);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | TaskStatus>("all");
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
   const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false);
   const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
 
@@ -528,10 +532,48 @@ export function TaskPanelBody(props?: {
     });
   };
 
-  const filteredTasks = tasks.filter((t) => {
-    if (filter === "all") return t.status !== "archived";
-    return t.status === filter;
-  });
+  const allTags = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of tasks) {
+      for (const tag of t.tags || []) s.add(tag);
+    }
+    return Array.from(s).sort();
+  }, [tasks]);
+
+  const readyTasks = useMemo(() => {
+    return getReadyTasks(tasks);
+  }, [tasks]);
+
+  const readyTaskIdSet = useMemo(() => {
+    return new Set(readyTasks.map((t) => t.id));
+  }, [readyTasks]);
+
+  const filteredTasks = useMemo(() => {
+    return tasks.filter((t) => {
+      if (filter === "all") {
+        if (t.status === "archived") return false;
+      } else if (t.status !== filter) {
+        return false;
+      }
+      if (selectedTag) {
+        if (!t.tags || !t.tags.includes(selectedTag)) return false;
+      }
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const matchId = t.id.toLowerCase().includes(q);
+        const matchTitle = t.title.toLowerCase().includes(q);
+        const matchDesc = t.description?.toLowerCase().includes(q) ?? false;
+        const matchDeliverables = t.conclusions.some((c) =>
+          c.deliverables?.some((d) => d.toLowerCase().includes(q))
+        );
+        const matchTags = t.tags?.some((tag) => tag.toLowerCase().includes(q)) ?? false;
+        if (!matchId && !matchTitle && !matchDesc && !matchDeliverables && !matchTags) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [tasks, filter, selectedTag, searchQuery]);
 
   const toggleExpand = (id: string) => {
     setExpandedTasks((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -584,6 +626,43 @@ export function TaskPanelBody(props?: {
       }, 1800);
     }
   };
+
+  const handleDispatchNextReady = async () => {
+    const target = readyTasks[0];
+    if (!target) return;
+    const prompt = `请帮我执行工作区就绪任务 [${target.id}]: "${target.title}"。\n${target.description ? `任务详情：\n${target.description}\n` : ""}\n请认领该任务并在完成后登记执行结论与交付物。`;
+    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
+    if (dshCtx?.composer?.append) {
+      dshCtx.composer.append(prompt);
+    } else if (dshCtx?.conversation?.send) {
+      dshCtx.conversation.send({ text: prompt });
+    } else {
+      try {
+        await navigator.clipboard.writeText(prompt);
+        alert(`已复制派发提示词到剪贴板，请直接粘贴发送给 Agent！`);
+      } catch {}
+    }
+    const sid = currentSessionId || findCurrentSession(dshCtx)?.sessionId;
+    if (sid) {
+      try {
+        await fetch(`${API_BASE}/update`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            workspacePath: workspace.path,
+            taskId: target.id,
+            status: "in_progress",
+            sessionId: sid,
+          }),
+        });
+        refresh();
+      } catch {}
+    }
+  };
+
+  const summaryReportMarkdown = useMemo(() => {
+    return generateWorkspaceSummaryReport(tasks, workspace.path);
+  }, [tasks, workspace.path]);
 
   return createElement(
     "div",
@@ -677,6 +756,16 @@ export function TaskPanelBody(props?: {
         createElement(
           "button",
           {
+            type: "button",
+            onClick: () => setShowReportModal(true),
+            style: reportBtnStyle,
+            title: "一键导出工作区全景交付与工程总结报告",
+          },
+          "📋 导出报告"
+        ),
+        createElement(
+          "button",
+          {
             onClick: refresh,
             style: iconBtnStyle,
             title: "刷新列表",
@@ -695,7 +784,90 @@ export function TaskPanelBody(props?: {
       )
     ),
 
-    // 过滤分段标签
+    // 搜索输入栏
+    createElement(
+      "div",
+      { style: searchContainerStyle },
+      createElement("input", {
+        type: "text",
+        placeholder: "🔍 搜索任务 ID、标题、描述、交付物或标签...",
+        value: searchQuery,
+        onChange: (e: ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value),
+        style: searchInputStyle,
+      }),
+      searchQuery &&
+        createElement(
+          "button",
+          {
+            type: "button",
+            onClick: () => setSearchQuery(""),
+            style: clearSearchBtnStyle,
+            title: "清空搜索",
+          },
+          "×"
+        )
+    ),
+
+    // 标签选择栏
+    allTags.length > 0 &&
+      createElement(
+        "div",
+        { style: tagFilterBarStyle },
+        createElement(
+          "button",
+          {
+            type: "button",
+            style: tagFilterChipStyle(selectedTag === null),
+            onClick: () => setSelectedTag(null),
+          },
+          "全部标签"
+        ),
+        allTags.map((tag) =>
+          createElement(
+            "button",
+            {
+              type: "button",
+              key: tag,
+              style: tagFilterChipStyle(selectedTag === tag),
+              onClick: () => setSelectedTag(selectedTag === tag ? null : tag),
+            },
+            `#${tag}`
+          )
+        )
+      ),
+
+    // 就绪任务快捷横幅
+    readyTasks.length > 0 &&
+      createElement(
+        "div",
+        { style: readyBannerStyle },
+        createElement(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: 6, fontSize: "11.5px", color: "#059669" } },
+          createElement("span", { style: { fontSize: "14px" } }, "🎯"),
+          createElement(
+            "span",
+            null,
+            "依赖已就绪：当前有 ",
+            createElement("strong", null, `${readyTasks.length}`),
+            " 个任务就绪可执行"
+          )
+        ),
+        createElement(
+          "button",
+          {
+            type: "button",
+            onClick: handleDispatchNextReady,
+            style: readyActionBtnStyle,
+            title: readyTasks[0]
+              ? `立即派发下一个就绪任务 [${readyTasks[0].id}]: "${readyTasks[0].title}"`
+              : "立即执行就绪任务",
+          },
+          readyTasks[0] ? `⚡ 立即执行 ${readyTasks[0].id}` : "⚡ 立即执行"
+        )
+      ),
+
+    // 状态过滤分段标签
     createElement(
       "div",
       { style: filterBarStyle },
@@ -732,6 +904,8 @@ export function TaskPanelBody(props?: {
               ? "加载任务中…"
               : filter === "archived"
               ? "暂无已归档任务"
+              : searchQuery || selectedTag
+              ? "未找到匹配的搜索或标签任务"
               : "暂无相关任务，点击右上角【新建任务】开始"
           )
         : filteredTasks.map((task) =>
@@ -743,11 +917,13 @@ export function TaskPanelBody(props?: {
               workspaceId: workspace.id,
               currentSessionId,
               isExpanded: !!expandedTasks[task.id],
+              isReady: readyTaskIdSet.has(task.id),
               onToggleExpand: () => toggleExpand(task.id),
               onStatusChange: (status) => updateStatus(task.id, status),
               onDelete: () => deleteTask(task.id),
               onConclusionAdded: refresh,
               onNavigateToTask: handleNavigateToTask,
+              onSelectTag: (t) => setSelectedTag(t),
               openFile: handleOpenFileProp,
             })
           )
@@ -764,6 +940,13 @@ export function TaskPanelBody(props?: {
           setShowCreateModal(false);
           refresh();
         },
+      }),
+
+    // 导出全景总结报告弹窗
+    showReportModal &&
+      createElement(ExportReportModal, {
+        markdown: summaryReportMarkdown,
+        onClose: () => setShowReportModal(false),
       })
   );
 }
@@ -908,11 +1091,13 @@ function TaskCard({
   workspaceId,
   currentSessionId,
   isExpanded,
+  isReady,
   onToggleExpand,
   onStatusChange,
   onDelete,
   onConclusionAdded,
   onNavigateToTask,
+  onSelectTag,
   openFile,
 }: {
   task: ProjectTask;
@@ -921,11 +1106,13 @@ function TaskCard({
   workspaceId?: string;
   currentSessionId?: string;
   isExpanded: boolean;
+  isReady?: boolean;
   onToggleExpand: () => void;
   onStatusChange: (status: TaskStatus) => void;
   onDelete: () => void;
   onConclusionAdded: () => void;
   onNavigateToTask?: (taskId: string) => void;
+  onSelectTag?: (tag: string) => void;
   openFile?: (path: string, workspacePath?: string) => Promise<void>;
 }) {
   const [showAddConc, setShowAddConc] = useState(false);
@@ -1201,6 +1388,10 @@ function TaskCard({
         { style: cardMetaStyle },
         createElement("span", { style: taskIdStyle }, task.id),
         createElement(PriorityBadge, { priority: task.priority }),
+        isReady &&
+          task.status !== "done" &&
+          task.status !== "archived" &&
+          createElement("span", { style: readyBadgeStyle }, "✓ 就绪"),
         task.assignee && createElement("span", { style: assigneeBadgeStyle }, `@${task.assignee}`),
         effectiveSessionId
           ? createElement(
@@ -1277,6 +1468,30 @@ function TaskCard({
 
     // 标题
     createElement("div", { style: cardTitleStyle }, task.title),
+
+    // 标签分类 (Tags)
+    task.tags &&
+      task.tags.length > 0 &&
+      createElement(
+        "div",
+        { style: tagsRowStyle },
+        task.tags.map((tag) =>
+          createElement(
+            "button",
+            {
+              type: "button",
+              key: tag,
+              style: tagChipStyle,
+              title: `点击按标签 #${tag} 过滤`,
+              onClick: (e: any) => {
+                e.stopPropagation();
+                onSelectTag?.(tag);
+              },
+            },
+            `#${tag}`
+          )
+        )
+      ),
 
     // 描述 (Markdown 渲染)
     task.description && createElement(MarkdownContent, { content: task.description, style: cardDescStyle }),
@@ -1518,6 +1733,96 @@ const PRIORITIES: { id: TaskPriority; label: string; desc: string; color: string
   { id: "P2", label: "P2 普通", desc: "常规事务", color: "#3b82f6", bg: "rgba(59, 130, 246, 0.12)" },
 ];
 
+function ExportReportModal({
+  markdown,
+  onClose,
+}: {
+  markdown: string;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  return createElement(
+    "div",
+    { style: modalOverlayStyle, onClick: onClose },
+    createElement(
+      "div",
+      {
+        style: {
+          ...modalContentStyle,
+          width: "min(680px, 94vw)",
+          maxHeight: "88vh",
+          display: "flex",
+          flexDirection: "column",
+        },
+        onClick: (e: any) => e.stopPropagation(),
+      },
+      createElement(
+        "div",
+        { style: modalHeaderStyle },
+        createElement(
+          "span",
+          {
+            style: {
+              fontWeight: "600",
+              fontSize: "15px",
+              color: "var(--dsw-alias-label-primary, #0f172a)",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+            },
+          },
+          "📋 工作区交付与工程总结报告"
+        ),
+        createElement("button", { onClick: onClose, style: closeBtnStyle }, "×")
+      ),
+      createElement(
+        "div",
+        {
+          style: {
+            flex: 1,
+            overflowY: "auto",
+            padding: "12px",
+            backgroundColor: "var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))",
+            borderRadius: "8px",
+            border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+            marginBottom: "16px",
+          },
+        },
+        createElement(MarkdownContent, { content: markdown })
+      ),
+      createElement(
+        "div",
+        { style: { display: "flex", justifyContent: "flex-end", gap: "10px" } },
+        createElement(
+          "button",
+          {
+            onClick: handleCopy,
+            style: {
+              ...primaryBtnStyle,
+              backgroundColor: copied ? "#059669" : "#2563eb",
+              color: "#ffffff",
+              border: "none",
+            },
+          },
+          copied ? "✓ 已复制 Markdown" : "📄 复制 Markdown 报告"
+        ),
+        createElement("button", { onClick: onClose, style: cancelBtnStyle }, "关闭")
+      )
+    )
+  );
+}
+
 function CreateTaskModal({
   workspacePath,
   existingTasks = [],
@@ -1534,6 +1839,7 @@ function CreateTaskModal({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<TaskPriority>("P1");
+  const [tagsInput, setTagsInput] = useState("");
   const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1550,6 +1856,11 @@ function CreateTaskModal({
     if (!title.trim() || submitting) return;
     setSubmitting(true);
     try {
+      const parsedTags = tagsInput
+        .split(/[,，\s]+/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+
       await fetch(`${API_BASE}/create`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1558,6 +1869,7 @@ function CreateTaskModal({
           title,
           description,
           priority,
+          tags: parsedTags,
           dependsOn: selectedDeps,
           ...(sessionId ? { sessionId } : {}),
         }),
@@ -1635,6 +1947,18 @@ function CreateTaskModal({
             );
           })
         )
+      ),
+      createElement(
+        "div",
+        { style: { marginBottom: 14 } },
+        createElement("label", { style: fieldLabelStyle }, "标签分类 (以逗号或空格分隔，选填)"),
+        createElement("input", {
+          type: "text",
+          placeholder: "例如：frontend, api, bugfix",
+          value: tagsInput,
+          onChange: (e: ChangeEvent<HTMLInputElement>) => setTagsInput(e.target.value),
+          style: inputStyle,
+        })
       ),
       candidateTasks.length > 0 &&
         createElement(
@@ -2328,3 +2652,126 @@ const menuItemStyle = (active: boolean): CSSProperties => ({
   textAlign: "left",
   outline: "none",
 });
+
+const readyBadgeStyle: CSSProperties = {
+  background: "rgba(16, 185, 129, 0.12)",
+  color: "#059669",
+  border: "1px solid rgba(16, 185, 129, 0.3)",
+  borderRadius: "10px",
+  padding: "1px 6px",
+  fontSize: "10px",
+  fontWeight: "600",
+};
+
+const tagsRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: "4px",
+  margin: "2px 0 4px 0",
+};
+
+const tagChipStyle: CSSProperties = {
+  fontSize: "10px",
+  fontWeight: "500",
+  padding: "1px 6px",
+  borderRadius: "6px",
+  backgroundColor: "rgba(37, 99, 235, 0.08)",
+  color: "var(--dsw-alias-brand-primary-new-colorprimary-new-color, #2563eb)",
+  border: "1px solid rgba(37, 99, 235, 0.2)",
+  display: "inline-flex",
+  alignItems: "center",
+  cursor: "pointer",
+};
+
+const reportBtnStyle: CSSProperties = {
+  background: "transparent",
+  border: "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
+  color: "var(--dsw-alias-label-secondary, #475569)",
+  borderRadius: "6px",
+  padding: "5px 9px",
+  fontSize: "11.5px",
+  fontWeight: "500",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "4px",
+};
+
+const searchContainerStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "6px",
+  padding: "10px 16px 8px 16px",
+  position: "relative",
+};
+
+const searchInputStyle: CSSProperties = {
+  flex: 1,
+  padding: "5px 10px",
+  borderRadius: "6px",
+  border: "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
+  backgroundColor: "var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02))",
+  fontSize: "11.5px",
+  color: "var(--dsw-alias-label-primary, #0f172a)",
+  outline: "none",
+};
+
+const clearSearchBtnStyle: CSSProperties = {
+  position: "absolute",
+  right: "24px",
+  top: "calc(50% + 1px)",
+  transform: "translateY(-50%)",
+  background: "transparent",
+  border: "none",
+  color: "var(--dsw-alias-label-tertiary, #94a3b8)",
+  cursor: "pointer",
+  fontSize: "14px",
+  lineHeight: "1",
+  padding: 0,
+};
+
+const tagFilterBarStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: "4px",
+  padding: "0 16px 8px 16px",
+};
+
+const tagFilterChipStyle = (active: boolean): CSSProperties => ({
+  border: active ? "1px solid #2563eb" : "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08))",
+  backgroundColor: active ? "rgba(37, 99, 235, 0.12)" : "var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02))",
+  color: active ? "#2563eb" : "var(--dsw-alias-label-secondary, #64748b)",
+  borderRadius: "10px",
+  padding: "2px 8px",
+  fontSize: "10.5px",
+  fontWeight: active ? "600" : "400",
+  cursor: "pointer",
+  transition: "all 0.15s ease",
+});
+
+const readyBannerStyle: CSSProperties = {
+  margin: "0 16px 8px 16px",
+  padding: "8px 12px",
+  borderRadius: "8px",
+  backgroundColor: "rgba(16, 185, 129, 0.08)",
+  border: "1px solid rgba(16, 185, 129, 0.25)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "8px",
+};
+
+const readyActionBtnStyle: CSSProperties = {
+  backgroundColor: "#059669",
+  color: "#ffffff",
+  border: "none",
+  borderRadius: "6px",
+  padding: "4px 10px",
+  fontSize: "11px",
+  fontWeight: "600",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  boxShadow: "0 1px 2px rgba(5, 150, 105, 0.3)",
+};

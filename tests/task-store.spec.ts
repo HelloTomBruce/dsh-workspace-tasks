@@ -163,4 +163,52 @@ describe("TaskStore", () => {
     const reloaded = tasks.find((t) => t.id === task.id);
     expect(reloaded?.sessionId).toBe("session-xyz-123");
   });
+
+  it("should create and update tasks with tags", async () => {
+    const task = await TaskStore.createTask(mockWorkspace, {
+      title: "Tagged task",
+      tags: ["frontend", " ui ", "frontend"], // duplicate & untrimmed
+    });
+    expect(task.tags).toEqual(["frontend", "ui"]);
+
+    const updated = await TaskStore.updateTask(mockWorkspace, task.id, {
+      tags: ["backend", "api"],
+    });
+    expect(updated?.tags).toEqual(["backend", "api"]);
+
+    // Clear tags
+    const cleared = await TaskStore.updateTask(mockWorkspace, task.id, {
+      tags: [],
+    });
+    expect(cleared?.tags).toBeUndefined();
+  });
+
+  it("should return ready tasks and export summary report", async () => {
+    const task1 = await TaskStore.createTask(mockWorkspace, { title: "Step 1" });
+    const task2 = await TaskStore.createTask(mockWorkspace, {
+      title: "Step 2",
+      dependsOn: [task1.id],
+    });
+
+    // Initially task1 is ready, task2 is not
+    let ready = await TaskStore.getReadyTasks(mockWorkspace);
+    expect(ready.map((t) => t.id)).toEqual([task1.id]);
+
+    // Complete task1
+    await TaskStore.addConclusion(mockWorkspace, task1.id, {
+      summary: "Completed step 1",
+      deliverables: ["dist/index.js"],
+      insights: ["Step 1 is smooth"],
+    });
+
+    // Now task2 is ready
+    ready = await TaskStore.getReadyTasks(mockWorkspace);
+    expect(ready.map((t) => t.id)).toEqual([task2.id]);
+
+    // Export report
+    const report = await TaskStore.exportSummaryReport(mockWorkspace);
+    expect(report).toContain("工作区交付与工程总结报告");
+    expect(report).toContain("dist/index.js");
+    expect(report).toContain("Step 1 is smooth");
+  });
 });

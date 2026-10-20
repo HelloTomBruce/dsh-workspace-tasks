@@ -71,6 +71,20 @@ export function registerTaskApis(ctx: Context): () => void {
           return;
         }
 
+        if (pathname === `${API_BASE}/ready` && req.method === "GET") {
+          const workspacePath = urlObj.searchParams.get("workspacePath") || process.cwd();
+          const readyTasks = await TaskStore.getReadyTasks(workspacePath);
+          sendJson(res, 200, { ok: true, data: readyTasks });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/report` && req.method === "GET") {
+          const workspacePath = urlObj.searchParams.get("workspacePath") || process.cwd();
+          const report = await TaskStore.exportSummaryReport(workspacePath);
+          sendJson(res, 200, { ok: true, data: { report } });
+          return;
+        }
+
         if (pathname === `${API_BASE}/create` && req.method === "POST") {
           const raw = await readBody(req);
           const body = parseJsonBody<{
@@ -78,6 +92,7 @@ export function registerTaskApis(ctx: Context): () => void {
             title?: string;
             description?: string;
             priority?: TaskPriority;
+            tags?: string[];
             assignee?: string;
             sessionId?: string;
             dependsOn?: string[];
@@ -85,6 +100,7 @@ export function registerTaskApis(ctx: Context): () => void {
               title: string;
               description?: string;
               priority?: TaskPriority;
+              tags?: string[];
               assignee?: string;
               sessionId?: string;
               dependsOn?: string[];
@@ -108,6 +124,7 @@ export function registerTaskApis(ctx: Context): () => void {
             title: body.title,
             description: body.description,
             priority: body.priority,
+            tags: body.tags,
             assignee: body.assignee,
             sessionId: body.sessionId,
             dependsOn: body.dependsOn,
@@ -125,6 +142,7 @@ export function registerTaskApis(ctx: Context): () => void {
             description?: string;
             status?: TaskStatus;
             priority?: TaskPriority;
+            tags?: string[];
             assignee?: string;
             sessionId?: string;
             dependsOn?: string[];

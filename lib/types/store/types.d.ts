@@ -14,6 +14,7 @@ export interface ProjectTask {
     description?: string;
     status: TaskStatus;
     priority: TaskPriority;
+    tags?: string[];
     assignee?: string;
     dependsOn?: string[];
     createdAt: string;

@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-tasks",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 插件：工作区任务与执行结论管理，集成于右侧侧边栏引导页（与工作区文件、新建终端并列）",
   "type": "module",
   "main": "./lib/index.js",
