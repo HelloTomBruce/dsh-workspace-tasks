@@ -8,6 +8,9 @@ import { findCurrentSession, openWorkspaceFileViaDsh } from "./dsh-open.ts";
 
 const API_BASE = "/__dsh-tasks__";
 
+// 标签筛选栏收起时最多直接展示的标签数量，超出部分通过「展开/收起」查看
+const TAG_COLLAPSE_LIMIT = 10;
+
 const MARKDOWN_STYLE_ID = "__dsh_workspace_tasks_markdown_styles__";
 
 function ensureMarkdownStyles() {
@@ -505,6 +508,7 @@ export function TaskPanelBody(props?: {
   const { tasks, summary, loading, refresh } = useTasks(workspace.path);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [tagsExpanded, setTagsExpanded] = useState(false);
   const [filter, setFilter] = useState<"all" | TaskStatus>("all");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
@@ -539,6 +543,18 @@ export function TaskPanelBody(props?: {
     }
     return Array.from(s).sort();
   }, [tasks]);
+
+  // 标签过多时收起仅展示前 TAG_COLLAPSE_LIMIT 个；若当前选中的标签被折叠隐藏，则追加到末尾，确保筛选状态始终可见
+  const visibleTags = useMemo(() => {
+    if (tagsExpanded || allTags.length <= TAG_COLLAPSE_LIMIT) return allTags;
+    const collapsed = allTags.slice(0, TAG_COLLAPSE_LIMIT);
+    if (selectedTag && allTags.includes(selectedTag) && !collapsed.includes(selectedTag)) {
+      collapsed.push(selectedTag);
+    }
+    return collapsed;
+  }, [allTags, tagsExpanded, selectedTag]);
+
+  const tagsOverflow = allTags.length - Math.min(allTags.length, TAG_COLLAPSE_LIMIT);
 
   const readyTasks = useMemo(() => {
     return getReadyTasks(tasks);
@@ -808,7 +824,7 @@ export function TaskPanelBody(props?: {
         )
     ),
 
-    // 标签选择栏
+    // 标签选择栏（标签过多时支持展开/收起）
     allTags.length > 0 &&
       createElement(
         "div",
@@ -822,7 +838,7 @@ export function TaskPanelBody(props?: {
           },
           "全部标签"
         ),
-        allTags.map((tag) =>
+        visibleTags.map((tag) =>
           createElement(
             "button",
             {
@@ -833,7 +849,21 @@ export function TaskPanelBody(props?: {
             },
             `#${tag}`
           )
-        )
+        ),
+        tagsOverflow > 0 &&
+          createElement(
+            "button",
+            {
+              type: "button",
+              key: "__tag_expand_toggle__",
+              style: tagExpandToggleStyle,
+              onClick: () => setTagsExpanded(!tagsExpanded),
+              title: tagsExpanded
+                ? "收起标签筛选，仅展示高频标签"
+                : `还有 ${tagsOverflow} 个标签被折叠，点击展开全部 ${allTags.length} 个标签`,
+            },
+            tagsExpanded ? "收起 ▴" : `展开 ${tagsOverflow} 个 ▾`
+          )
       ),
 
     // 就绪任务快捷横幅
@@ -2750,6 +2780,21 @@ const tagFilterChipStyle = (active: boolean): CSSProperties => ({
   cursor: "pointer",
   transition: "all 0.15s ease",
 });
+
+const tagExpandToggleStyle: CSSProperties = {
+  background: "transparent",
+  border: "none",
+  color: "var(--dsw-alias-label-tertiary, #94a3b8)",
+  fontSize: "10.5px",
+  fontWeight: "500",
+  padding: "2px 6px",
+  borderRadius: "10px",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  whiteSpace: "nowrap",
+  transition: "all 0.15s ease",
+};
 
 const readyBannerStyle: CSSProperties = {
   margin: "0 16px 8px 16px",
