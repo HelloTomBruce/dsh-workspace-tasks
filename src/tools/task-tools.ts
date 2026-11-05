@@ -199,7 +199,6 @@ export function registerTaskTools(ctx: Context): () => void {
       isConcurrencySafe: () => false,
       async execute(args: WorkspaceTaskToolArgs, exec?: any) {
         const sessionCwd = exec?.agent?.session?.header?.cwd;
-        const agentSessionId = exec?.agent?.session?.header?.id;
         const rawPath = args.workspacePath || sessionCwd || process.cwd();
         const cwd = path.resolve(rawPath);
 
@@ -242,11 +241,7 @@ export function registerTaskTools(ctx: Context): () => void {
 
           case "create": {
             if (Array.isArray(args.tasks) && args.tasks.length > 0) {
-              const tasksToCreate = args.tasks.map((t) => ({
-                ...t,
-                ...(agentSessionId ? { sessionId: agentSessionId } : {}),
-              }));
-              const createdList = await TaskStore.createTasks(cwd, tasksToCreate);
+              const createdList = await TaskStore.createTasks(cwd, args.tasks);
               return {
                 ok: true,
                 action: "create",
@@ -264,7 +259,6 @@ export function registerTaskTools(ctx: Context): () => void {
               tags: args.tags,
               assignee: args.assignee,
               dependsOn: args.dependsOn,
-              ...(agentSessionId ? { sessionId: agentSessionId } : {}),
             });
             if (!task) throw new Error(`Task ${args.taskId} not found in ${cwd}`);
             return {
@@ -286,7 +280,6 @@ export function registerTaskTools(ctx: Context): () => void {
               tags: args.tags,
               assignee: args.assignee,
               dependsOn: args.dependsOn,
-              ...(agentSessionId ? { sessionId: agentSessionId } : {}),
             });
             if (!task) throw new Error(`Task ${args.taskId} not found in ${cwd}`);
             return {
@@ -305,7 +298,6 @@ export function registerTaskTools(ctx: Context): () => void {
               summary: args.summary,
               deliverables: args.deliverables,
               insights: args.insights,
-              ...(agentSessionId ? { sessionId: agentSessionId } : {}),
             });
             if (!task) throw new Error(`Task ${args.taskId} not found in ${cwd}`);
             return {

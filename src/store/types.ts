@@ -7,7 +7,6 @@ export interface TaskConclusion {
   deliverables?: string[];
   insights?: string[];
   completedAt: string;
-  sessionId?: string;
 }
 
 export interface ProjectTask {
@@ -21,7 +20,6 @@ export interface ProjectTask {
   dependsOn?: string[];
   createdAt: string;
   updatedAt: string;
-  sessionId?: string;
   conclusions: TaskConclusion[];
 }
 

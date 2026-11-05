@@ -152,9 +152,6 @@ export function generateWorkspaceSummaryReport(
       if (t.description) {
         lines.push(`${t.description}\n`);
       }
-      if (t.sessionId) {
-        lines.push(`- **关联会话**: \`#${t.sessionId.slice(0, 8)}\``);
-      }
       if (t.conclusions && t.conclusions.length > 0) {
         lines.push(`- **执行结论**:`);
         for (const c of t.conclusions) {

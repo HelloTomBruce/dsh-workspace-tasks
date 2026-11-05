@@ -94,7 +94,6 @@ export function registerTaskApis(ctx: Context): () => void {
             priority?: TaskPriority;
             tags?: string[];
             assignee?: string;
-            sessionId?: string;
             dependsOn?: string[];
             tasks?: Array<{
               title: string;
@@ -102,7 +101,6 @@ export function registerTaskApis(ctx: Context): () => void {
               priority?: TaskPriority;
               tags?: string[];
               assignee?: string;
-              sessionId?: string;
               dependsOn?: string[];
             }>;
           }>(raw);
@@ -126,7 +124,6 @@ export function registerTaskApis(ctx: Context): () => void {
             priority: body.priority,
             tags: body.tags,
             assignee: body.assignee,
-            sessionId: body.sessionId,
             dependsOn: body.dependsOn,
           });
           sendJson(res, 200, { ok: true, data: task });
@@ -144,7 +141,6 @@ export function registerTaskApis(ctx: Context): () => void {
             priority?: TaskPriority;
             tags?: string[];
             assignee?: string;
-            sessionId?: string;
             dependsOn?: string[];
           }>(raw);
 
@@ -171,7 +167,6 @@ export function registerTaskApis(ctx: Context): () => void {
             summary: string;
             deliverables?: string[];
             insights?: string[];
-            sessionId?: string;
           }>(raw);
 
           if (!body || !body.taskId || !body.summary) {

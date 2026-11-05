@@ -23,7 +23,6 @@ describe("Pipeline & Readiness Engine", () => {
           deliverables: ["src/server.ts", "package.json"],
           insights: ["记得保留端口重试逻辑"],
           completedAt: "2026-10-20T10:30:00Z",
-          sessionId: "sess-12345678",
         },
       ],
     },

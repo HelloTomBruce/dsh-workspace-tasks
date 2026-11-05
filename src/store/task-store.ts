@@ -126,7 +126,6 @@ export class TaskStore {
       priority?: TaskPriority;
       tags?: string[];
       assignee?: string;
-      sessionId?: string;
       dependsOn?: string[];
     }>
   ): Promise<ProjectTask[]> {
@@ -165,8 +164,6 @@ export class TaskStore {
         ...(validDeps.length > 0 ? { dependsOn: validDeps } : {}),
         createdAt: now,
         updatedAt: now,
-        // 仅在确有值时写入：undefined 自有属性无法通过 harness 的 lossless-JSON 快照校验
-        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
         conclusions: [],
       };
       created.push(newTask);
@@ -187,7 +184,6 @@ export class TaskStore {
       priority?: TaskPriority;
       tags?: string[];
       assignee?: string;
-      sessionId?: string;
       dependsOn?: string[];
     }
   ): Promise<ProjectTask> {
@@ -201,7 +197,7 @@ export class TaskStore {
   static async updateTask(
     workspacePath: string,
     taskId: string,
-    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "tags" | "assignee" | "dependsOn" | "sessionId">>
+    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "tags" | "assignee" | "dependsOn">>
   ): Promise<ProjectTask | null> {
     const doc = await this.load(workspacePath);
     const task = doc.tasks.find((t) => t.id === taskId);
@@ -220,13 +216,6 @@ export class TaskStore {
         task.tags = validTags;
       } else {
         delete task.tags;
-      }
-    }
-    if (patch.sessionId !== undefined) {
-      if (patch.sessionId) {
-        task.sessionId = patch.sessionId;
-      } else {
-        delete task.sessionId;
       }
     }
     if (patch.dependsOn !== undefined) {
@@ -252,22 +241,18 @@ export class TaskStore {
       summary: string;
       deliverables?: string[];
       insights?: string[];
-      sessionId?: string;
     }
   ): Promise<ProjectTask | null> {
     const doc = await this.load(workspacePath);
     const task = doc.tasks.find((t) => t.id === taskId);
     if (!task) return null;
 
-    const conclusionSessionId = conclusion.sessionId ?? task.sessionId;
     const newConclusion: TaskConclusion = {
       id: `CONC-${Date.now()}`,
       summary: conclusion.summary.trim(),
       deliverables: conclusion.deliverables ?? [],
       insights: conclusion.insights ?? [],
       completedAt: new Date().toISOString(),
-      // 仅在确有值时写入：undefined 自有属性无法通过 harness 的 lossless-JSON 快照校验
-      ...(conclusionSessionId !== undefined ? { sessionId: conclusionSessionId } : {}),
     };
 
     task.conclusions.unshift(newConclusion);

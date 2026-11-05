@@ -658,22 +658,18 @@ export function TaskPanelBody(props?: {
         alert(`已复制派发提示词到剪贴板，请直接粘贴发送给 Agent！`);
       } catch {}
     }
-    const sid = currentSessionId || findCurrentSession(dshCtx)?.sessionId;
-    if (sid) {
-      try {
-        await fetch(`${API_BASE}/update`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            workspacePath: workspace.path,
-            taskId: target.id,
-            status: "in_progress",
-            sessionId: sid,
-          }),
-        });
-        refresh();
-      } catch {}
-    }
+    try {
+      await fetch(`${API_BASE}/update`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          workspacePath: workspace.path,
+          taskId: target.id,
+          status: "in_progress",
+        }),
+      });
+      refresh();
+    } catch {}
   };
 
   const summaryReportMarkdown = useMemo(() => {
@@ -945,7 +941,6 @@ export function TaskPanelBody(props?: {
               allTasks: tasks,
               workspacePath: workspace.path,
               workspaceId: workspace.id,
-              currentSessionId,
               isExpanded: !!expandedTasks[task.id],
               isReady: readyTaskIdSet.has(task.id),
               onToggleExpand: () => toggleExpand(task.id),
@@ -964,7 +959,6 @@ export function TaskPanelBody(props?: {
       createElement(CreateTaskModal, {
         workspacePath: workspace.path,
         existingTasks: tasks,
-        sessionId: currentSessionId,
         onClose: () => setShowCreateModal(false),
         onCreated: () => {
           setShowCreateModal(false);
@@ -1119,7 +1113,6 @@ function TaskCard({
   allTasks = [],
   workspacePath,
   workspaceId,
-  currentSessionId,
   isExpanded,
   isReady,
   onToggleExpand,
@@ -1134,7 +1127,6 @@ function TaskCard({
   allTasks?: ProjectTask[];
   workspacePath: string;
   workspaceId?: string;
-  currentSessionId?: string;
   isExpanded: boolean;
   isReady?: boolean;
   onToggleExpand: () => void;
@@ -1153,7 +1145,6 @@ function TaskCard({
   const [assignedStatus, setAssignedStatus] = useState<"dispatched" | "failed" | null>(null);
   const [openingFile, setOpeningFile] = useState<string | null>(null);
   const [fileStatus, setFileStatus] = useState<Record<string, "opened" | "copied" | "missing" | "failed">>({});
-  const [linkedSessionId, setLinkedSessionId] = useState<string | null>(null);
 
   // 计算前置依赖未完成项
   const unmetDeps = (task.dependsOn ?? []).filter((depId) => {
@@ -1184,7 +1175,6 @@ function TaskCard({
         opened = true;
       } else {
         await openWorkspaceFileViaDsh(dshCtx, cleanRel, {
-          sessionId: currentSessionId,
           workspacePath,
         });
         opened = true;
@@ -1211,20 +1201,6 @@ function TaskCard({
         return next;
       });
     }, 2800);
-  };
-
-  const handleOpenSession = async (targetSessionId: string) => {
-    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-    if (!targetSessionId) return;
-    try {
-      if (dshCtx?.uiWorkspace?.openSession) {
-        await dshCtx.uiWorkspace.openSession(targetSessionId);
-      } else if (dshCtx?.sessions?.open) {
-        await dshCtx.sessions.open(targetSessionId);
-      }
-    } catch (err) {
-      console.warn("Failed to open session:", err);
-    }
   };
 
   const handleAssignToAgent = async () => {
@@ -1256,7 +1232,7 @@ function TaskCard({
     try {
       const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
       const activeSession = findCurrentSession(dshCtx);
-      let targetSessionId = currentSessionId || activeSession?.sessionId;
+      let targetSessionId = activeSession?.sessionId;
 
       if (!targetSessionId && typeof document !== "undefined") {
         targetSessionId =
@@ -1310,22 +1286,6 @@ function TaskCard({
             console.warn("scopedCtx.conversation.send error", e);
           }
         }
-        if (dispatched) {
-          try {
-            await fetch(`${API_BASE}/update`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                workspacePath,
-                taskId: task.id,
-                sessionId: targetSessionId,
-              }),
-            });
-            onConclusionAdded();
-          } catch (e) {
-            console.warn("Failed to associate task with session", e);
-          }
-        }
       }
     } catch (err) {
       console.warn("Direct dispatch to agent failed:", err);
@@ -1348,10 +1308,6 @@ function TaskCard({
         .map((s) => s.trim())
         .filter(Boolean);
 
-      const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-      const activeSession = findCurrentSession(dshCtx);
-      const concSessionId = currentSessionId || activeSession?.sessionId || task.sessionId;
-
       await fetch(`${API_BASE}/conclude`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1361,7 +1317,6 @@ function TaskCard({
           summary: concSummary,
           deliverables,
           insights,
-          ...(concSessionId ? { sessionId: concSessionId } : {}),
         }),
       });
 
@@ -1376,35 +1331,6 @@ function TaskCard({
       setSavingConc(false);
     }
   };
-
-  const handleLinkCurrentSession = async () => {
-    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-    const sid = currentSessionId || findCurrentSession(dshCtx)?.sessionId;
-    if (!sid) return;
-    setLinkedSessionId(sid);
-    try {
-      const res = await fetch(`${API_BASE}/update`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          workspacePath,
-          taskId: task.id,
-          sessionId: sid,
-        }),
-      });
-      const data = await res.json();
-      if (!data.ok) {
-        throw new Error(data.error || "Update failed");
-      }
-      onConclusionAdded();
-    } catch (e) {
-      console.warn("Failed to link session:", e);
-      setLinkedSessionId(null);
-    }
-  };
-
-  const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-  const effectiveSessionId = linkedSessionId || task.sessionId;
 
   return createElement(
     "div",
@@ -1422,30 +1348,7 @@ function TaskCard({
           task.status !== "done" &&
           task.status !== "archived" &&
           createElement("span", { style: readyBadgeStyle }, "✓ 就绪"),
-        task.assignee && createElement("span", { style: assigneeBadgeStyle }, `@${task.assignee}`),
-        effectiveSessionId
-          ? createElement(
-              "button",
-              {
-                type: "button",
-                style: sessionBadgeStyle,
-                title: `点击跳转至关联会话: ${effectiveSessionId}`,
-                onClick: () => handleOpenSession(effectiveSessionId),
-              },
-              `💬 会话 #${effectiveSessionId.slice(-6)}`
-            )
-          : (currentSessionId || findCurrentSession(dshCtx)?.sessionId)
-          ? createElement(
-              "button",
-              {
-                type: "button",
-                style: linkSessionBtnStyle,
-                title: `点击将当前会话 (#${(currentSessionId || findCurrentSession(dshCtx)?.sessionId)!.slice(-6)}) 关联到此任务`,
-                onClick: handleLinkCurrentSession,
-              },
-              `+ 关联会话`
-            )
-          : null
+        task.assignee && createElement("span", { style: assigneeBadgeStyle }, `@${task.assignee}`)
       ),
       createElement(
         "div",
@@ -1609,18 +1512,7 @@ function TaskCard({
                 "span",
                 { style: concTimeStyle },
                 `完成于 ${new Date(conc.completedAt).toLocaleString()}`
-              ),
-              conc.sessionId &&
-                createElement(
-                  "button",
-                  {
-                    type: "button",
-                    style: sessionBadgeStyle,
-                    title: `点击跳转至生成此结论的会话: ${conc.sessionId}`,
-                    onClick: () => handleOpenSession(conc.sessionId!),
-                  },
-                  `💬 会话 #${conc.sessionId.slice(-6)}`
-                )
+              )
             ),
             createElement(MarkdownContent, { content: conc.summary, style: concSummaryStyle }),
             conc.deliverables &&
@@ -1856,13 +1748,11 @@ function ExportReportModal({
 function CreateTaskModal({
   workspacePath,
   existingTasks = [],
-  sessionId,
   onClose,
   onCreated,
 }: {
   workspacePath: string;
   existingTasks?: ProjectTask[];
-  sessionId?: string;
   onClose: () => void;
   onCreated: () => void;
 }) {
@@ -1901,7 +1791,6 @@ function CreateTaskModal({
           priority,
           tags: parsedTags,
           dependsOn: selectedDeps,
-          ...(sessionId ? { sessionId } : {}),
         }),
       });
       onCreated();
@@ -2286,36 +2175,6 @@ const assignBtnStyle = (status: "dispatched" | "failed" | null): CSSProperties =
   gap: "3px",
   transition: "all 0.15s ease",
 });
-
-const sessionBadgeStyle: CSSProperties = {
-  background: "rgba(99, 102, 241, 0.1)",
-  border: "1px solid rgba(99, 102, 241, 0.25)",
-  color: "#6366f1",
-  borderRadius: "10px",
-  padding: "1px 6px",
-  fontSize: "10px",
-  fontWeight: "500",
-  cursor: "pointer",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: "2px",
-  transition: "all 0.15s ease",
-};
-
-const linkSessionBtnStyle: CSSProperties = {
-  background: "transparent",
-  border: "1px dashed rgba(99, 102, 241, 0.35)",
-  color: "var(--dsw-alias-label-tertiary, #64748b)",
-  borderRadius: "10px",
-  padding: "1px 6px",
-  fontSize: "10px",
-  fontWeight: "500",
-  cursor: "pointer",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: "2px",
-  transition: "all 0.15s ease",
-};
 
 const depsRowStyle: CSSProperties = {
   display: "flex",

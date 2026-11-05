@@ -150,20 +150,6 @@ describe("TaskStore", () => {
     expect(cleared?.dependsOn).toBeUndefined();
   });
 
-  it("should update task sessionId via updateTask", async () => {
-    const task = await TaskStore.createTask(mockWorkspace, { title: "Session task" });
-    expect(task.sessionId).toBeUndefined();
-
-    const updated = await TaskStore.updateTask(mockWorkspace, task.id, {
-      sessionId: "session-xyz-123",
-    });
-    expect(updated?.sessionId).toBe("session-xyz-123");
-
-    const { tasks } = await TaskStore.listTasks(mockWorkspace);
-    const reloaded = tasks.find((t) => t.id === task.id);
-    expect(reloaded?.sessionId).toBe("session-xyz-123");
-  });
-
   it("should create and update tasks with tags", async () => {
     const task = await TaskStore.createTask(mockWorkspace, {
       title: "Tagged task",
