@@ -84,15 +84,17 @@ dsh-workspace-tasks/
 │   ├── index.ts               # Host 端入口（注册 API 路由与 Agent Tools）
 │   ├── ambient.d.ts           # 类型声明
 │   ├── store/
-│   │   ├── types.ts           # 任务与结论数据模型
+│   │   ├── types.ts           # 任务/结论/决策/检查点/跨工作区引用数据模型
 │   │   └── task-store.ts      # 本地文件持久化驱动 (~/.dsh/storages/workspace-tasks/)
 │   ├── api/
-│   │   └── router.ts          # REST API (/__dsh-tasks__/list, create, update, conclude...)
+│   │   └── router.ts          # REST API (/__dsh-tasks__/list, create, decision, history, trace...)
 │   ├── tools/
-│   │   └── task-tools.ts      # 大模型 Agent 专用工具 (workspace_task)
+│   │   └── task-tools.ts      # Agent 工具 (workspace_task: record_decision / get_task_history / link_trace...)
 │   └── client/
 │       ├── index.ts           # 客户端入口（注册 sidebarRightTabs 与 UI 插槽）
 │       ├── icons.tsx          # 主题自适应 SVG 图标
+│       ├── markdown.tsx       # Markdown 渲染器（描述/结论/决策 rationale 共用）
+│       ├── TraceSections.tsx  # 痕迹 UI：决策演进链 / 跨工作区引用 / 过程检查点时间线
 │       └── TaskPanel.tsx      # 看板、状态筛选、任务卡片与结论抽屉组件
 └── tests/
     ├── task-store.spec.ts     # 存储层单元测试
