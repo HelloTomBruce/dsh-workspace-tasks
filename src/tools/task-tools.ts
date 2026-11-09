@@ -13,7 +13,18 @@ export interface TaskCreateItem {
 }
 
 export interface WorkspaceTaskToolArgs {
-  action: "list" | "create" | "update" | "conclude" | "archive" | "delete" | "get_ready_tasks" | "export_report";
+  action:
+    | "list"
+    | "create"
+    | "update"
+    | "conclude"
+    | "archive"
+    | "delete"
+    | "get_ready_tasks"
+    | "export_report"
+    | "record_decision"
+    | "get_task_history"
+    | "link_trace";
   taskId?: string;
   title?: string;
   description?: string;
@@ -27,6 +38,24 @@ export interface WorkspaceTaskToolArgs {
   deliverables?: string[];
   insights?: string[];
   workspacePath?: string;
+  /** record_decision / supersedeDecision 时使用：决策标题 */
+  decisionTitle?: string;
+  /** record_decision 时使用：决策理由（自包含，不依赖会话内容） */
+  rationale?: string;
+  /** record_decision 时使用：已考虑并否决的备选方案 */
+  alternatives?: string[];
+  /** record_decision 时使用：决策者标识（自由文本快照） */
+  actor?: string;
+  /** record_decision 时使用：产生决策的会话 ID（装饰性可悬挂线索） */
+  sessionId?: string;
+  /** record_decision 时使用：要取代（supersede）的既有决策 ID */
+  supersedeDecisionId?: string;
+  /** link_trace 时使用：被引用工作区路径 */
+  refWorkspacePath?: string;
+  /** link_trace 时使用：被引用任务 ID */
+  refTaskId?: string;
+  /** link_trace 时使用：引用说明 */
+  refNote?: string;
 }
 
 const TOOL_DESCRIPTION = `Manage project tasks and record execution conclusions in the current workspace.
@@ -37,6 +66,9 @@ Actions:
 - create: Create a single task (via title, description, priority, tags) or batch create multiple tasks (via tasks array).
 - update: Update task status (todo/in_progress/review/done/blocked/archived), description, priority, tags, or assignee.
 - conclude: Complete a task and record execution conclusion, key deliverables (files created/modified), and insights. Automatically transitions task status to "done".
+- record_decision: Append an immutable decision record (title + rationale + alternatives). Pass supersedeDecisionId to replace an old decision — old decisions are never rewritten, only superseded via a chain. sessionId is a decorative dangling-safe hint, never required for reading.
+- get_task_history: Fetch the append-only checkpoint event log of a task (field changes, conclusions, decisions), newest first.
+- link_trace: Add a read-only cross-workspace trace reference {refWorkspacePath, refTaskId, refNote} to a task. Resolution degrades gracefully (dangling) when the source is deleted or unreachable.
 - export_report: Generate a comprehensive Markdown sprint/delivery summary report for the current workspace.
 - archive: Archive a completed task, removing it from active board.
 - delete: Remove a task.
@@ -74,7 +106,8 @@ You have access to the \`workspace_task\` tool to manage project tasks and execu
      - \`summary\`: Concise summary of what was implemented or resolved.
      - \`deliverables\`: Array of relative paths of created or modified files.
      - \`insights\`: Array of key findings, architectural decisions, or caveats.
-   - The conclude action will automatically transition the task status to \`done\` and persist your conclusions.`;
+   - The conclude action will automatically transition the task status to \`done\` and persist your conclusions.
+    - When a **key architectural/technical decision** was made during execution, ALSO call \`record_decision\` with a self-contained \`rationale\` (survives session deletion; \`sessionId\` is only a decorative hint). If revising a previous decision, pass \`supersedeDecisionId\` instead of rewriting it.`;
 
 export function registerTaskTools(ctx: Context): () => void {
   const tools = (ctx as unknown as { tools?: { register: (tool: unknown) => () => void } }).tools;
@@ -101,7 +134,19 @@ export function registerTaskTools(ctx: Context): () => void {
         properties: {
           action: {
             type: "string",
-            enum: ["list", "get_ready_tasks", "create", "update", "conclude", "export_report", "archive", "delete"],
+            enum: [
+              "list",
+              "get_ready_tasks",
+              "create",
+              "update",
+              "conclude",
+              "record_decision",
+              "get_task_history",
+              "link_trace",
+              "export_report",
+              "archive",
+              "delete",
+            ],
             description: "Action to perform on workspace tasks",
           },
           taskId: {
@@ -181,6 +226,43 @@ export function registerTaskTools(ctx: Context): () => void {
           workspacePath: {
             type: "string",
             description: "Optional workspace root directory. Defaults to the current session's workspace directory.",
+          },
+          decisionTitle: {
+            type: "string",
+            description: "Decision title, required for record_decision (with or without supersedeDecisionId)",
+          },
+          rationale: {
+            type: "string",
+            description: "Decision rationale — must be self-contained (survives session deletion), required for record_decision",
+          },
+          alternatives: {
+            type: "array",
+            items: { type: "string" },
+            description: "Alternatives considered and rejected (optional, for record_decision)",
+          },
+          actor: {
+            type: "string",
+            description: "Decision maker identifier (free-text snapshot, e.g. 'agent' or user name)",
+          },
+          sessionId: {
+            type: "string",
+            description: "Optional session ID hint (decorative, dangling-safe; never required to read the decision)",
+          },
+          supersedeDecisionId: {
+            type: "string",
+            description: "Existing decision ID (DEC-xxx) to supersede — old decision body is never rewritten, only marked superseded",
+          },
+          refWorkspacePath: {
+            type: "string",
+            description: "Source workspace absolute path, required for link_trace",
+          },
+          refTaskId: {
+            type: "string",
+            description: "Source task ID (e.g. TASK-001), required for link_trace",
+          },
+          refNote: {
+            type: "string",
+            description: "Why this trace is referenced (optional, for link_trace)",
           },
         },
         required: ["action"],
@@ -305,6 +387,73 @@ export function registerTaskTools(ctx: Context): () => void {
               action: "conclude",
               workspacePath: cwd,
               message: `Concluded task ${task.id} successfully with conclusion record`,
+              task,
+            };
+          }
+
+          case "record_decision": {
+            if (!args.taskId) throw new Error("Missing required 'taskId' for record_decision");
+            if (!args.decisionTitle?.trim()) throw new Error("Missing required 'decisionTitle' for record_decision");
+            if (!args.rationale?.trim()) throw new Error("Missing required 'rationale' for record_decision");
+            const decisionPayload = {
+              title: args.decisionTitle,
+              rationale: args.rationale,
+              alternatives: args.alternatives,
+              actor: args.actor ?? "agent",
+              sessionId: args.sessionId,
+            };
+            let record;
+            if (args.supersedeDecisionId?.trim()) {
+              record = await TaskStore.supersedeDecision(cwd, args.taskId, args.supersedeDecisionId.trim(), decisionPayload);
+              if (!record) {
+                throw new Error(`Decision ${args.supersedeDecisionId} not found (or already superseded) on task ${args.taskId}`);
+              }
+            } else {
+              record = await TaskStore.addDecision(cwd, args.taskId, decisionPayload);
+              if (!record) throw new Error(`Task ${args.taskId} not found in ${cwd}`);
+            }
+            return {
+              ok: true,
+              action: "record_decision",
+              workspacePath: cwd,
+              decisionId: record.id,
+              message: `Recorded decision ${record.id} on ${args.taskId}: "${record.title}"${args.supersedeDecisionId ? ` (supersedes ${args.supersedeDecisionId})` : ""}`,
+              decision: record,
+            };
+          }
+
+          case "get_task_history": {
+            if (!args.taskId) throw new Error("Missing required 'taskId' for get_task_history");
+            const [history, decisions] = await Promise.all([
+              TaskStore.getTaskHistory(cwd, args.taskId),
+              TaskStore.listDecisions(cwd, args.taskId),
+            ]);
+            return {
+              ok: true,
+              action: "get_task_history",
+              workspacePath: cwd,
+              taskId: args.taskId,
+              checkpoints: history,
+              decisions,
+              message: `Task ${args.taskId}: ${history.length} checkpoint(s), ${decisions.length} decision(s)`,
+            };
+          }
+
+          case "link_trace": {
+            if (!args.taskId) throw new Error("Missing required 'taskId' for link_trace");
+            if (!args.refWorkspacePath?.trim()) throw new Error("Missing required 'refWorkspacePath' for link_trace");
+            if (!args.refTaskId?.trim()) throw new Error("Missing required 'refTaskId' for link_trace");
+            const task = await TaskStore.addTraceRef(cwd, args.taskId, {
+              workspacePath: args.refWorkspacePath,
+              taskId: args.refTaskId,
+              note: args.refNote,
+            });
+            if (!task) throw new Error(`Task ${args.taskId} not found in ${cwd}`);
+            return {
+              ok: true,
+              action: "link_trace",
+              workspacePath: cwd,
+              message: `Linked trace ${args.refTaskId} of ${args.refWorkspacePath} to ${task.id}`,
               task,
             };
           }

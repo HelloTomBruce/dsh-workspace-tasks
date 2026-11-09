@@ -1,157 +1,16 @@
 import { createElement, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ChangeEvent } from "react";
-import { marked } from "marked";
-import type { ProjectTask, TaskPriority, TaskStatus, WorkspaceTasksSummary } from "../store/types.ts";
+import type { ProjectTask, TaskPriority, TaskStatus, TraceRef, WorkspaceTasksSummary } from "../store/types.ts";
 import { getReadyTasks, generateWorkspaceSummaryReport } from "../store/pipeline.ts";
 import { PlusIcon, RefreshIcon, TaskTabIcon } from "./icons.tsx";
 import { findCurrentSession, openWorkspaceFileViaDsh } from "./dsh-open.ts";
+import { MarkdownContent } from "./markdown.tsx";
+import { decisionChipStyle, traceChipStyle, TraceSections } from "./TraceSections.tsx";
 
 const API_BASE = "/__dsh-tasks__";
 
 // 标签筛选栏收起时最多直接展示的标签数量，超出部分通过「展开/收起」查看
 const TAG_COLLAPSE_LIMIT = 10;
-
-const MARKDOWN_STYLE_ID = "__dsh_workspace_tasks_markdown_styles__";
-
-function ensureMarkdownStyles() {
-  if (typeof document === "undefined") return;
-  if (document.getElementById(MARKDOWN_STYLE_ID)) return;
-  const styleEl = document.createElement("style");
-  styleEl.id = MARKDOWN_STYLE_ID;
-  styleEl.textContent = `
-    .dsh-task-markdown {
-      font-size: 12px;
-      line-height: 1.5;
-      color: var(--dsw-alias-label-secondary, #475569);
-      word-break: break-word;
-    }
-    .dsh-task-markdown p {
-      margin: 0 0 6px 0;
-    }
-    .dsh-task-markdown p:last-child {
-      margin-bottom: 0;
-    }
-    .dsh-task-markdown h1,
-    .dsh-task-markdown h2,
-    .dsh-task-markdown h3,
-    .dsh-task-markdown h4 {
-      color: var(--dsw-alias-label-primary, #0f172a);
-      font-weight: 600;
-      margin: 6px 0 3px 0;
-      line-height: 1.3;
-    }
-    .dsh-task-markdown h1 { font-size: 13px; }
-    .dsh-task-markdown h2 { font-size: 12.5px; }
-    .dsh-task-markdown h3 { font-size: 12px; }
-    .dsh-task-markdown h4 { font-size: 11.5px; }
-    .dsh-task-markdown ul,
-    .dsh-task-markdown ol {
-      margin: 2px 0 6px 0;
-      padding-left: 18px;
-    }
-    .dsh-task-markdown li {
-      margin-bottom: 2px;
-    }
-    .dsh-task-markdown li:last-child {
-      margin-bottom: 0;
-    }
-    .dsh-task-markdown code {
-      font-family: var(--dsw-alias-font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
-      font-size: 11px;
-      padding: 1px 4px;
-      border-radius: 4px;
-      background: var(--dsw-alias-surface-elevation-2, rgba(0, 0, 0, 0.05));
-      color: var(--dsw-alias-label-primary, #0f172a);
-      border: 1px solid var(--dsw-alias-border-subtle, rgba(0, 0, 0, 0.08));
-    }
-    .dsh-task-markdown pre {
-      margin: 6px 0;
-      padding: 6px 8px;
-      background: var(--dsw-alias-surface-elevation-2, rgba(0, 0, 0, 0.05));
-      border: 1px solid var(--dsw-alias-border-subtle, rgba(0, 0, 0, 0.08));
-      border-radius: 6px;
-      overflow-x: auto;
-      font-size: 11px;
-      line-height: 1.4;
-    }
-    .dsh-task-markdown pre code {
-      padding: 0;
-      background: transparent;
-      border: none;
-      font-size: inherit;
-      color: inherit;
-    }
-    .dsh-task-markdown blockquote {
-      margin: 4px 0 6px 0;
-      padding: 2px 8px;
-      border-left: 3px solid var(--dsw-alias-brand-primary-new-colorprimary-new-color, #2563eb);
-      background: var(--dsw-alias-surface-elevation-1, rgba(0, 0, 0, 0.02));
-      color: var(--dsw-alias-label-secondary, #64748b);
-      border-radius: 0 4px 4px 0;
-    }
-    .dsh-task-markdown a {
-      color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #2563eb);
-      text-decoration: none;
-    }
-    .dsh-task-markdown a:hover {
-      text-decoration: underline;
-    }
-    .dsh-task-markdown hr {
-      margin: 6px 0;
-      border: none;
-      border-top: 1px solid var(--dsw-alias-border-subtle, rgba(0, 0, 0, 0.08));
-    }
-    .dsh-task-markdown table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 6px 0;
-      font-size: 11px;
-    }
-    .dsh-task-markdown th,
-    .dsh-task-markdown td {
-      border: 1px solid var(--dsw-alias-border-subtle, rgba(0, 0, 0, 0.08));
-      padding: 3px 6px;
-      text-align: left;
-    }
-    .dsh-task-markdown th {
-      background: var(--dsw-alias-surface-elevation-2, rgba(0, 0, 0, 0.04));
-      font-weight: 600;
-      color: var(--dsw-alias-label-primary, #0f172a);
-    }
-  `;
-  document.head.appendChild(styleEl);
-}
-
-export function MarkdownContent({
-  content,
-  style,
-  className,
-}: {
-  content?: string;
-  style?: CSSProperties;
-  className?: string;
-}) {
-  useEffect(() => {
-    ensureMarkdownStyles();
-  }, []);
-
-  const html = useMemo(() => {
-    if (!content) return "";
-    try {
-      return marked.parse(content, { gfm: true, breaks: true, async: false }) as string;
-    } catch {
-      return content;
-    }
-  }, [content]);
-
-  if (!content) return null;
-
-  return createElement("div", {
-    className: ["dsh-task-markdown", className].filter(Boolean).join(" "),
-    style,
-    dangerouslySetInnerHTML: { __html: html },
-  });
-}
 
 interface ListResponse {
   ok: boolean;
@@ -1145,6 +1004,27 @@ function TaskCard({
   const [assignedStatus, setAssignedStatus] = useState<"dispatched" | "failed" | null>(null);
   const [openingFile, setOpeningFile] = useState<string | null>(null);
   const [fileStatus, setFileStatus] = useState<Record<string, "opened" | "copied" | "missing" | "failed">>({});
+  const [resolvedTraces, setResolvedTraces] = useState<TraceRef[] | null>(null);
+
+  const decisions = task.decisionLog ?? [];
+  const checkpoints = task.history ?? [];
+  const traceRefs = task.traceRefs ?? [];
+
+  // 展开且有跨工作区引用时，按需解析来源标题/结论摘要（悬挂降级由后端完成）
+  useEffect(() => {
+    if (!isExpanded || traceRefs.length === 0 || resolvedTraces) return;
+    let alive = true;
+    const query = `?taskId=${encodeURIComponent(task.id)}${workspacePath ? `&workspacePath=${encodeURIComponent(workspacePath)}` : ""}`;
+    fetch(`${API_BASE}/trace${query}`, { cache: "no-store" })
+      .then((r) => r.json() as Promise<{ ok: boolean; data?: TraceRef[] }>)
+      .then((res) => {
+        if (alive && res.ok && res.data) setResolvedTraces(res.data);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [isExpanded, traceRefs.length, resolvedTraces, task.id, workspacePath]);
 
   // 计算前置依赖未完成项
   const unmetDeps = (task.dependsOn ?? []).filter((depId) => {
@@ -1446,6 +1326,26 @@ function TaskCard({
             ? `📝 ${task.conclusions.length} 条结论 ${isExpanded ? "▲" : "▼"}`
             : `📝 暂无结论 ${isExpanded ? "▲" : "▼"}`
         ),
+        decisions.length > 0 &&
+          createElement(
+            "span",
+            {
+              style: decisionChipStyle,
+              title: decisions
+                .map((d) => `${d.id}: ${d.title}${d.supersededBy ? `（已被 ${d.supersededBy} 取代）` : ""}`)
+                .join("\n"),
+            },
+            `⚖️ ${decisions.length} 决策`
+          ),
+        traceRefs.length > 0 &&
+          createElement(
+            "span",
+            {
+              style: traceChipStyle,
+              title: traceRefs.map((r) => `${r.taskId} @ ${r.workspacePath}`).join("\n"),
+            },
+            `🔗 ${traceRefs.length} 引用`
+          ),
         task.status !== "done" &&
           task.status !== "archived" &&
           createElement(
@@ -1642,10 +1542,18 @@ function TaskCard({
                 style: appendConcBtnStyle,
               },
               "+ 追加执行结论"
-            )
+            ),
+
+        createElement(TraceSections, {
+          decisions,
+          checkpoints,
+          traceRefs,
+          resolvedTraces,
+        })
       )
   );
 }
+
 
 // ---------------- 新建弹窗组件 ----------------
 
@@ -2290,6 +2198,7 @@ const conclusionDrawerStyle: CSSProperties = {
   flexDirection: "column",
   gap: 8,
 };
+
 
 const conclusionItemStyle: CSSProperties = {
   backgroundColor: "var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.03))",

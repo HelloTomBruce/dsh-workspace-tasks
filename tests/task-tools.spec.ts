@@ -350,4 +350,122 @@ describe("registerTaskTools", () => {
     expect(reportRes.report).toContain("Always salt passwords");
     expect(() => assertLosslessJson(reportRes, "exportReport")).not.toThrow();
   });
+
+  it("should record decisions immutably and read history with dangling sessionId", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: { register: (tool: any) => { registeredTool = tool; return () => {}; } },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    await registeredTool.execute({ action: "create", title: "Decision task", workspacePath: mockWorkspace });
+
+    // record_decision
+    const decRes = await registeredTool.execute({
+      action: "record_decision",
+      taskId: "TASK-001",
+      decisionTitle: "Use JSON storage",
+      rationale: "Self-contained and human-readable",
+      alternatives: ["SQLite"],
+      sessionId: "session-to-be-deleted",
+      workspacePath: mockWorkspace,
+    });
+    expect(decRes.ok).toBe(true);
+    expect(decRes.decisionId).toMatch(/^DEC-/);
+    expect(() => assertLosslessJson(decRes, "recordDecision")).not.toThrow();
+
+    // supersede via tool
+    const supRes = await registeredTool.execute({
+      action: "record_decision",
+      taskId: "TASK-001",
+      decisionTitle: "Use JSON storage with atomic rename",
+      rationale: "Avoid partial writes",
+      supersedeDecisionId: decRes.decisionId,
+      workspacePath: mockWorkspace,
+    });
+    expect(supRes.ok).toBe(true);
+    expect(supRes.message).toContain(`supersedes ${decRes.decisionId}`);
+
+    // 旧决策不可再次 supersede
+    await expect(
+      registeredTool.execute({
+        action: "record_decision",
+        taskId: "TASK-001",
+        decisionTitle: "Third",
+        rationale: "should fail",
+        supersedeDecisionId: decRes.decisionId,
+        workspacePath: mockWorkspace,
+      })
+    ).rejects.toThrow(/already superseded/);
+
+    // 模拟会话删除：直接改盘上 sessionId 为悬挂值
+    const filePath = path.join(tmpDir, (await fs.readdir(tmpDir))[0] ?? "");
+    const raw = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    raw.tasks[0].decisionLog[1].sessionId = "session-deleted";
+    await fs.writeFile(filePath, JSON.stringify(raw), "utf-8");
+
+    // get_task_history：sessionId 悬挂不影响决策读取
+    const histRes = await registeredTool.execute({
+      action: "get_task_history",
+      taskId: "TASK-001",
+      workspacePath: mockWorkspace,
+    });
+    expect(histRes.ok).toBe(true);
+    expect(histRes.decisions.length).toBe(2);
+    expect(histRes.decisions[1].supersededBy).toBe(histRes.decisions[0].id);
+    expect(histRes.decisions[1].title).toBe("Use JSON storage");
+    expect(histRes.decisions[1].sessionId).toBe("session-deleted");
+    expect(histRes.checkpoints.some((c: any) => c.field === "decision")).toBe(true);
+    expect(() => assertLosslessJson(histRes, "history")).not.toThrow();
+
+    // 缺参校验
+    await expect(
+      registeredTool.execute({ action: "record_decision", taskId: "TASK-001", decisionTitle: "No rationale", workspacePath: mockWorkspace })
+    ).rejects.toThrow(/rationale/);
+  });
+
+  it("should link and resolve cross-workspace traces via tool", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: { register: (tool: any) => { registeredTool = tool; return () => {}; } },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    const source = await registeredTool.execute({
+      action: "create",
+      title: "Source trace task",
+      workspacePath: "/Users/zhangbei/code/source-ws",
+    });
+    await registeredTool.execute({
+      action: "conclude",
+      taskId: source.task.id,
+      summary: "Source concluded",
+      workspacePath: "/Users/zhangbei/code/source-ws",
+    });
+    await registeredTool.execute({ action: "create", title: "Consumer task", workspacePath: mockWorkspace });
+
+    const linkRes = await registeredTool.execute({
+      action: "link_trace",
+      taskId: "TASK-001",
+      refWorkspacePath: "/Users/zhangbei/code/source-ws",
+      refTaskId: source.task.id,
+      refNote: "Reuse design",
+      workspacePath: mockWorkspace,
+    });
+    expect(linkRes.ok).toBe(true);
+    expect(linkRes.task.traceRefs.length).toBe(1);
+    expect(() => assertLosslessJson(linkRes, "linkTrace")).not.toThrow();
+
+    // 缺参校验
+    await expect(
+      registeredTool.execute({
+        action: "link_trace",
+        taskId: "TASK-001",
+        refTaskId: source.task.id,
+        workspacePath: mockWorkspace,
+      })
+    ).rejects.toThrow(/refWorkspacePath/);
+  });
 });

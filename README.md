@@ -6,6 +6,33 @@ DSH（DeepSeek Harness）工作区任务与执行结论管理插件。
 
 ---
 
+## 🧬 设计哲学：记录 / 留痕 / 可追溯（Stigmergy）
+
+本插件的定位不只是任务看板，而是多 Agent 协作的**痕迹介质（stigmergy medium）**：Agent 之间不做点对点的无效寒暄，只改共享环境、留痕迹，后来的 Agent 读痕迹直接行动。三条不变量：
+
+1. **决策自包含**：决策记录（`DecisionRecord`）的 `title` + `rationale` + `alternatives` 完整落盘在任务文档内。会话/Agent 会被删除，决策内容不会——`sessionId` / `actor` 仅为**装饰性溯源线索，可悬挂**，读取路径零依赖。
+2. **Append-only**：决策正文与过程检查点一旦写入即不可改写。改主意只能通过 `supersedeDecisionId` 取代旧决策（旧记录仅打 `supersededBy` 标记，建立演进链），保证追溯时看到的永远是当时写下的原话。
+3. **引用可悬挂**：跨工作区痕迹引用（`TraceRef`）是只读的、与被引用方完全解耦——来源任务被删除或工作区不可达时降级为 `dangling` 提示，绝不阻塞本工作区读写。
+
+由此形成完整的追溯链：**任务 → 决策记录（自包含）→ 过程检查点（`{at, field, from, to}` 事件日志）→ 交付物指针 → 可选 session 线索**。
+
+### 痕迹能力一览
+
+| 能力 | 工具 action | REST API | 说明 |
+|---|---|---|---|
+| 记录决策 | `record_decision` | `POST /__dsh-tasks__/decision` | 自包含决策，支持 supersede 链 |
+| 查询过程 | `get_task_history` | `GET /__dsh-tasks__/history?taskId=` | 检查点事件 + 决策日志，最新在前 |
+| 跨工作区引用 | `link_trace` | `POST /__dsh-tasks__/trace` | 只读引用，同引用去重 |
+| 解析引用 | — | `GET /__dsh-tasks__/trace?taskId=` | 填充来源标题/结论摘要，悬挂降级 |
+
+### 与 AI 对话示例（痕迹场景）
+
+* *"TASK-003 里我们改用了原子写入方案，请记录这个决策并取代之前的 DEC-xxxx，理由是避免半写。"*
+* *"给我看 TASK-003 的完整过程历史和所有决策演进链。"*
+* *"把 /path/to/other-workspace 的 TASK-002 作为设计依据引用到 TASK-005 上。"*
+
+---
+
 ## 🌟 核心功能
 
 1. **原生右侧栏 Tab 集成**：
@@ -105,5 +132,6 @@ pnpm run build
 * *"帮我把当前工作区的用户认证重构需求拆解成几个任务并记录下来。"*
 * *"我现在开始做 TASK-001，请帮我把它的状态改成进行中。"*
 * *"我已完成 TASK-001 的单元测试编写，请帮我登记执行结论，产出文件是 tests/auth.spec.ts，并把状态置为已完成。"*
+* *"TASK-002 期间我们决定放弃 SQLite 改用 JSON 文件存储，请把这个决策记录到 TASK-002 上。"*
 
-Agent 将直接调用内置的 `workspace_task` 工具完成状态与结论持久化，右侧任务 Tab 会自动刷新展示！
+Agent 将直接调用内置的 `workspace_task` 工具完成状态、结论与决策的持久化，右侧任务 Tab 会自动刷新展示！
