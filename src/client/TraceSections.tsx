@@ -125,15 +125,32 @@ const itemTimeStyle: CSSProperties = {
   color: "var(--dsw-alias-label-tertiary, #94a3b8)",
 };
 
-/** 检查点 from/to JSON 快照的缩略显示 */
+/** 截断并在超长时追加省略号 */
+function trunc(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/**
+ * 检查点 from/to JSON 快照的缩略显示。
+ * 优先提取语义字段（id/title）生成可读标签，避免把 JSON 拦腰截断；
+ * 完整快照通过 title 属性 hover 查看。
+ */
 function shortSnapshot(s: string): string {
   try {
     const v = JSON.parse(s);
     if (v === null) return "∅";
-    if (typeof v === "string") return v.length > 24 ? `${v.slice(0, 24)}…` : v;
-    return JSON.stringify(v).slice(0, 36);
+    if (typeof v === "string") return trunc(v, 24);
+    if (typeof v === "object" && v !== null) {
+      const obj = v as Record<string, unknown>;
+      if (typeof obj.id === "string") {
+        const title = typeof obj.title === "string" ? ` ${trunc(obj.title, 18)}` : "";
+        return trunc(`${obj.id}${title}`, 40);
+      }
+      return trunc(JSON.stringify(obj), 36);
+    }
+    return trunc(String(v), 24);
   } catch {
-    return s.length > 24 ? `${s.slice(0, 24)}…` : s;
+    return trunc(s, 24);
   }
 }
 
