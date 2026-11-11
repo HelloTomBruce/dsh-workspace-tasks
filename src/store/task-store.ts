@@ -63,6 +63,31 @@ function emitTaskDone(workspacePath: string, task: ProjectTask): void {
   }
 }
 
+/**
+ * 任务创建事件钩子：createTasks 批量创建完成后触发一次（整批一次，非每 task 一次）。
+ * 供自动派发引擎把「新建就绪任务」也作为派发时机——批量拆解时由并发闸门保证最多派一条。
+ */
+export type TasksCreatedListener = (workspacePath: string, tasks: ProjectTask[]) => void;
+
+const tasksCreatedListeners = new Set<TasksCreatedListener>();
+
+export function onTasksCreated(listener: TasksCreatedListener): () => void {
+  tasksCreatedListeners.add(listener);
+  return () => {
+    tasksCreatedListeners.delete(listener);
+  };
+}
+
+function emitTasksCreated(workspacePath: string, tasks: ProjectTask[]): void {
+  for (const listener of tasksCreatedListeners) {
+    try {
+      listener(workspacePath, tasks);
+    } catch (err) {
+      console.error("[dsh-workspace-tasks] onTasksCreated listener error:", err);
+    }
+  }
+}
+
 export type ApprovalResult =
   | { ok: true; approval: ApprovalRequest; task: ProjectTask; decision?: DecisionRecord }
   | {
@@ -244,6 +269,8 @@ export class TaskStore {
     if (created.length > 0) {
       doc.tasks.unshift(...created);
       await this.save(workspacePath, doc);
+      // 创建即事件：自动派发引擎借此把「新建就绪任务」纳入派发时机
+      emitTasksCreated(workspacePath, created);
     }
     return created;
   }

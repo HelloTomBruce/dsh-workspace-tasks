@@ -23,6 +23,12 @@ export type ClaimResult = {
  */
 export type TaskDoneListener = (workspacePath: string, task: ProjectTask) => void;
 export declare function onTaskDone(listener: TaskDoneListener): () => void;
+/**
+ * 任务创建事件钩子：createTasks 批量创建完成后触发一次（整批一次，非每 task 一次）。
+ * 供自动派发引擎把「新建就绪任务」也作为派发时机——批量拆解时由并发闸门保证最多派一条。
+ */
+export type TasksCreatedListener = (workspacePath: string, tasks: ProjectTask[]) => void;
+export declare function onTasksCreated(listener: TasksCreatedListener): () => void;
 export type ApprovalResult = {
     ok: true;
     approval: ApprovalRequest;

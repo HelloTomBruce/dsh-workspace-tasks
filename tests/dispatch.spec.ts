@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { TaskStore } from "../src/store/task-store.ts";
+import { TaskStore, onTasksCreated } from "../src/store/task-store.ts";
 import { DispatchEngine } from "../src/store/dispatch.ts";
 
 describe("DispatchEngine 自动派发引擎", () => {
@@ -263,5 +263,50 @@ describe("DispatchEngine 自动派发引擎", () => {
     expect(rules.staleHours).toBe(48);
     const clamped = await DispatchEngine.updateRules(mockWorkspace, { staleHours: 9999 });
     expect(clamped.staleHours).toBe(720);
+  });
+
+  it("创建触发：批量建卡触发评估，并发闸门保证最多派一条，hop 从 1 开始", async () => {
+    await DispatchEngine.updateRules(mockWorkspace, { mode: "auto" });
+
+    const dispose = onTasksCreated((wp) => {
+      void DispatchEngine.evaluate(wp);
+    });
+    try {
+      // 模拟需求拆解：一次批量建两张卡（都会触发，但整批只 emit 一次）
+      await TaskStore.createTasks(mockWorkspace, [
+        { title: "Created A", priority: "P0" },
+        { title: "Created B", priority: "P0" },
+      ]);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const log = await DispatchEngine.listLog(mockWorkspace);
+      expect(log.length).toBe(1);
+      expect(log[0]?.status).toBe("queued");
+      expect(log[0]?.hop).toBe(1); // 无触发链（人为起点），hop 从 1 开始
+      expect(log[0]?.triggerTaskId).toBeUndefined();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("创建触发但全部不就绪（依赖未满足）：静默不派", async () => {
+    const blocker = await createTask("Blocker", { priority: "P0" });
+    // blocker 被他人活跃锁定（派过了），不作为候选；只验证「依赖未满足的新卡不派」
+    await TaskStore.claimTask(mockWorkspace, blocker.id, { owner: "agent@other" });
+    const dispose = onTasksCreated((wp) => {
+      void DispatchEngine.evaluate(wp);
+    });
+    try {
+      await TaskStore.createTask(mockWorkspace, {
+        title: "Blocked by dep",
+        priority: "P0",
+        dependsOn: [blocker.id],
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const log = await DispatchEngine.listLog(mockWorkspace);
+      expect(log.length).toBe(0);
+    } finally {
+      dispose();
+    }
   });
 });
