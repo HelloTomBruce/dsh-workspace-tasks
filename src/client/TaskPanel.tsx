@@ -469,6 +469,16 @@ export function TaskPanelBody(props?: {
   const [showReportModal, setShowReportModal] = useState(false);
   const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  // 跨工作区派发开关（插件配置，宿主持久化；此处为 UI 态，点击即 POST 立即生效）
+  const [crossWorkspaceOn, setCrossWorkspaceOn] = useState(false);
+  useEffect(() => {
+    fetch(`${API_BASE}/dispatch/config`, { cache: "no-store" })
+      .then((r) => r.json() as Promise<{ ok: boolean; data?: { crossWorkspaceDispatch?: boolean } }>)
+      .then((res) => {
+        if (res.ok && res.data) setCrossWorkspaceOn(res.data.crossWorkspaceDispatch === true);
+      })
+      .catch(() => {});
+  }, []);
   const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
 
   const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
@@ -865,6 +875,32 @@ export function TaskPanelBody(props?: {
                   )
                 ),
               dispatchRules && createElement("div", { style: menuDividerStyle }),
+              createElement(
+                "button",
+                {
+                  type: "button",
+                  style: menuItemStyle(crossWorkspaceOn),
+                  title:
+                    "跨工作区派发：开启后执行器轮询全部工作区的派发队列（默认只盯当前工作区）。立即生效，无需重启",
+                  onClick: async () => {
+                    const next = !crossWorkspaceOn;
+                    setCrossWorkspaceOn(next);
+                    try {
+                      await fetch(`${API_BASE}/dispatch/config`, {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ crossWorkspaceDispatch: next }),
+                      });
+                    } catch (e) {
+                      console.error(e);
+                      setCrossWorkspaceOn(!next);
+                    }
+                  },
+                },
+                "🌐 跨工作区派发",
+                crossWorkspaceOn ? " ✓" : ""
+              ),
+              createElement("div", { style: menuDividerStyle }),
               createElement(
                 "button",
                 {

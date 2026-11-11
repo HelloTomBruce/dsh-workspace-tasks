@@ -3,7 +3,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import { TaskStore } from "../store/task-store.ts";
 import { DispatchEngine } from "../store/dispatch.ts";
 import { listGlobalOverview } from "../store/global.ts";
-import { isCrossWorkspaceDispatchEnabled } from "../store/dispatch-config.ts";
+import { isCrossWorkspaceDispatchEnabled, setCrossWorkspaceDispatch } from "../store/dispatch-config.ts";
 import type { DispatchMode } from "../store/dispatch.ts";
 import type { TaskPriority, TaskStatus } from "../store/types.ts";
 
@@ -508,8 +508,23 @@ export function registerTaskApis(ctx: Context): () => void {
           return;
         }
 
-        // 插件级配置（cordis.patch.yml 注入）：客户端执行器据此决定是否轮询全部工作区
+        // 插件级配置：读合并结果；UI 开关走 POST（持久化 + 立即生效）
         if (pathname === `${API_BASE}/dispatch/config` && req.method === "GET") {
+          sendJson(res, 200, {
+            ok: true,
+            data: { crossWorkspaceDispatch: isCrossWorkspaceDispatchEnabled() },
+          });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/dispatch/config` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{ crossWorkspaceDispatch?: boolean }>(raw);
+          if (!body || typeof body.crossWorkspaceDispatch !== "boolean") {
+            sendJson(res, 400, { ok: false, error: "Missing boolean 'crossWorkspaceDispatch'" });
+            return;
+          }
+          await setCrossWorkspaceDispatch(body.crossWorkspaceDispatch);
           sendJson(res, 200, {
             ok: true,
             data: { crossWorkspaceDispatch: isCrossWorkspaceDispatchEnabled() },

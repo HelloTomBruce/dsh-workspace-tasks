@@ -26,16 +26,19 @@ interface CrossWorkspacePendingEntry {
   record: PendingDispatchEntry;
 }
 
-/** 插件配置（宿主注入，经 REST 暴露）：crossWorkspaceDispatch 默认关闭 */
+/** 插件配置（宿主注入，经 REST 暴露与修改）：crossWorkspaceDispatch 默认关闭；60s TTL 自动感知 UI 开关变更 */
 let crossWorkspaceEnabled: boolean | null = null;
+let crossWorkspaceFetchedAt = 0;
 async function isCrossWorkspaceEnabled(): Promise<boolean> {
-  if (crossWorkspaceEnabled === null) {
+  if (crossWorkspaceEnabled === null || Date.now() - crossWorkspaceFetchedAt > 60_000) {
     try {
       const res = await fetch(`${API_BASE}/dispatch/config`, { cache: "no-store" });
       const json = (await res.json()) as { ok: boolean; data?: { crossWorkspaceDispatch?: boolean } };
       crossWorkspaceEnabled = json?.data?.crossWorkspaceDispatch === true;
+      crossWorkspaceFetchedAt = Date.now();
     } catch {
-      crossWorkspaceEnabled = false;
+      // 拉取失败沿用上次值（或 false），下一轮再试
+      if (crossWorkspaceEnabled === null) crossWorkspaceEnabled = false;
     }
   }
   return crossWorkspaceEnabled;
