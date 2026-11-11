@@ -1,0 +1,1 @@
+{"version":3,"file":"dispatch-config.js","sourceRoot":"","sources":["../../../src/store/dispatch-config.ts"],"names":[],"mappings":"AAaA,IAAI,OAAO,GAA+B,EAAE,CAAC;AAE7C,MAAM,UAAU,eAAe,CAAC,MAA8C;IAC5E,OAAO,GAAG,MAAM,IAAI,EAAE,CAAC;AACzB,CAAC;AAED,MAAM,UAAU,+BAA+B;IAC7C,OAAO,OAAO,CAAC,QAAQ,EAAE,cAAc,KAAK,IAAI,CAAC;AACnD,CAAC"}

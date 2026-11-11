@@ -55,8 +55,8 @@ export interface GlobalOverview {
   };
 }
 
-/** 扫描存储目录，返回所有工作区任务文档（排除 dispatch 文件；坏文件 parse 为 null） */
-async function scanWorkspaceDocuments(): Promise<
+/** 扫描存储目录，返回所有工作区任务文档（排除 dispatch 文件；坏文件 parse 为 null）。供跨工作区派发取件复用。 */
+export async function scanWorkspaceDocuments(): Promise<
   Array<{ fileName: string; doc: WorkspaceTasksDocument | null; mtime: string }>
 > {
   const dir = getStorageDir();

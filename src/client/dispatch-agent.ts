@@ -1,10 +1,37 @@
 import { findCurrentSession } from "./dsh-open.ts";
 
 /**
- * 把派发提示词送进当前 Agent 会话（统一派发通道）。
+ * 按目标工作区路径匹配会话：sessions 列表快照的行带 cwd，
+ * 取 cwd 归一化相等且最近更新的会话——跨工作区派发的路由依据。
+ * 路径不匹配比错误路由更好：宁可返回 undefined 走活跃会话兜底，
+ * 也不把 B 工作区的活送进 A 工作区的会话。
+ */
+function findSessionByCwd(ctx: unknown, workspacePath: string): string | undefined {
+  try {
+    const normalize = (p: string) => p.replace(/[/\\]+$/, "");
+    const target = normalize(workspacePath);
+    const listSnapshot = (ctx as any)?.sessions?.list?.getSnapshot?.();
+    const rows = Object.values(listSnapshot?.byId ?? {}) as Array<{
+      sessionId: string;
+      cwd?: string;
+      updatedAt?: number;
+    }>;
+    const candidates = rows.filter((r) => r.cwd && normalize(r.cwd) === target);
+    if (candidates.length === 0) return undefined;
+    candidates.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    return candidates[0]?.sessionId;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 把派发提示词送进 Agent 会话（统一派发通道）。
  *
- * 会话解析顺序：主视图活跃 session → DOM data 属性 → localStorage →
- * uiWorkspace.connectWorkspace(workspaceId)（实在没有会话时按工作区连一个）。
+ * 会话解析顺序：
+ * 1. 指定 workspacePath 时优先按 cwd 匹配该工作区的会话（跨工作区派发的路由依据）；
+ * 2. 主视图活跃 session → DOM data 属性 → localStorage →
+ *    uiWorkspace.connectWorkspace(workspaceId)（实在没有会话时按工作区连一个）。
  * 发送通道按可用性降级：sessions.binding(sessionId).session.prompt（队列模式）
  * → sessions.scope(sessionId).conversation.send（字符串签名）。
  *
@@ -13,13 +40,21 @@ import { findCurrentSession } from "./dsh-open.ts";
  */
 export async function dispatchPromptToAgent(
   prompt: string,
-  opts?: { workspaceId?: string }
+  opts?: { workspaceId?: string; workspacePath?: string }
 ): Promise<boolean> {
   try {
     const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
     if (!dshCtx) return false;
 
-    let targetSessionId: string | undefined = findCurrentSession(dshCtx)?.sessionId;
+    let targetSessionId: string | undefined;
+
+    // 1. 按目标工作区 cwd 精确匹配会话（跨工作区派发的关键路由）
+    if (opts?.workspacePath) {
+      const matched = findSessionByCwd(dshCtx, opts.workspacePath);
+      if (matched) targetSessionId = matched;
+    }
+
+    if (!targetSessionId) targetSessionId = findCurrentSession(dshCtx)?.sessionId;
 
     if (!targetSessionId && typeof document !== "undefined") {
       targetSessionId =

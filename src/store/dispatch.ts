@@ -4,7 +4,6 @@ import crypto from "node:crypto";
 import { getReadyTasks } from "./pipeline.js";
 import { TaskStore, getTasksFilePath } from "./task-store.ts";
 import type { ProjectTask, TaskPriority } from "./types.ts";
-
 /**
  * 自动派发引擎（Fast Path 事件驱动）：宿主侧纯规则判定，零 Token。
  *
@@ -152,6 +151,33 @@ export class DispatchEngine {
   static async listPending(workspacePath: string): Promise<DispatchRecord[]> {
     const doc = await this.load(workspacePath);
     return doc.log.filter((r) => r.status === "queued");
+  }
+
+  /**
+   * 跨工作区取件（配置 dispatch.crossWorkspace 开启时由执行器调用）：
+   * 扫全部工作区文档，聚合各自派发队列里的 queued 条目（附 workspacePath 供路由会话）。
+   * 单个派发文件损坏时降级跳过，绝不抛错。
+   */
+  static async listPendingAllWorkspaces(): Promise<
+    Array<{ workspacePath: string; record: DispatchRecord }>
+  > {
+    const { scanWorkspaceDocuments } = await import("./global.js");
+    const docs = await scanWorkspaceDocuments();
+    const out: Array<{ workspacePath: string; record: DispatchRecord }> = [];
+    for (const { doc } of docs) {
+      if (!doc?.workspacePath) continue;
+      try {
+        const dispatchDoc = await this.load(doc.workspacePath);
+        for (const record of dispatchDoc.log) {
+          if (record.status === "queued") out.push({ workspacePath: doc.workspacePath, record });
+        }
+      } catch {
+        // 单个工作区派发文件不可读：跳过，不影响其他工作区
+      }
+    }
+    // 最新在前
+    out.sort((a, b) => new Date(b.record.createdAt).getTime() - new Date(a.record.createdAt).getTime());
+    return out;
   }
 
   static async listLog(workspacePath: string, limit = 50): Promise<DispatchRecord[]> {

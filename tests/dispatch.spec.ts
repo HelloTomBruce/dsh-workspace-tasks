@@ -309,4 +309,42 @@ describe("DispatchEngine 自动派发引擎", () => {
       dispose();
     }
   });
+
+  it("listPendingAllWorkspaces：聚合多工作区 queued，附 workspacePath，最新在前", async () => {
+    const wsA = "/Users/zhangbei/code/dsp-alpha";
+    const wsB = "/Users/zhangbei/code/dsp-beta";
+    await DispatchEngine.updateRules(wsA, { mode: "auto" });
+    await DispatchEngine.updateRules(wsB, { mode: "auto" });
+
+    await TaskStore.createTask(wsA, { title: "A ready", priority: "P0" });
+    await TaskStore.createTask(wsB, { title: "B ready", priority: "P1" });
+
+    const r1 = await DispatchEngine.evaluate(wsA);
+    expect(r1?.status).toBe("queued");
+    // 稍后 B 也入队
+    await new Promise((r) => setTimeout(r, 5));
+    const r2 = await DispatchEngine.evaluate(wsB);
+    expect(r2?.status).toBe("queued");
+
+    const all = await DispatchEngine.listPendingAllWorkspaces();
+    expect(all.length).toBe(2);
+    expect(all.map((e) => e.workspacePath).sort()).toEqual([wsA, wsB].sort());
+    // 最新在前：B 的记录晚于 A
+    expect(all[0]?.workspacePath).toBe(wsB);
+    expect(all[0]?.record.status).toBe("queued");
+  });
+
+  it("listPendingAllWorkspaces：坏派发文件降级跳过不抛错", async () => {
+    await DispatchEngine.updateRules(mockWorkspace, { mode: "auto" });
+    await createTask("Healthy", { priority: "P0" });
+    await DispatchEngine.evaluate(mockWorkspace);
+
+    // 写一个损坏的派发文件（对应某个工作区）
+    const { getDispatchFilePath } = await import("../src/store/dispatch.ts");
+    await fs.writeFile(getDispatchFilePath("/Users/zhangbei/code/broken-dsp"), "{ broken", "utf-8");
+
+    const all = await DispatchEngine.listPendingAllWorkspaces();
+    expect(all.length).toBe(1);
+    expect(all[0]?.workspacePath).toBe(mockWorkspace);
+  });
 });

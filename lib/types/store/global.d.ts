@@ -1,4 +1,4 @@
-import type { ApprovalRequest, ProjectTask, WorkspaceTasksSummary } from "./types.ts";
+import type { ApprovalRequest, ProjectTask, WorkspaceTasksDocument, WorkspaceTasksSummary } from "./types.ts";
 /**
  * 跨工作区全局聚合（个人中台视图的数据层）：扫描存储目录里所有工作区任务文档，
  * 聚合出「人的注意力该去哪里」的一屏数据——待拍板 / 进行中 / 待验收 / 阻塞 / 就绪。
@@ -54,6 +54,12 @@ export interface GlobalOverview {
         ready: number;
     };
 }
+/** 扫描存储目录，返回所有工作区任务文档（排除 dispatch 文件；坏文件 parse 为 null）。供跨工作区派发取件复用。 */
+export declare function scanWorkspaceDocuments(): Promise<Array<{
+    fileName: string;
+    doc: WorkspaceTasksDocument | null;
+    mtime: string;
+}>>;
 /** 聚合所有工作区的中台视图数据 */
 export declare function listGlobalOverview(): Promise<GlobalOverview>;
 //# sourceMappingURL=global.d.ts.map

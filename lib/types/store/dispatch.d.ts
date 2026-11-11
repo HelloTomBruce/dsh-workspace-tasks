@@ -57,6 +57,15 @@ export declare class DispatchEngine {
     static updateRules(workspacePath: string, patch: Partial<DispatchRules>): Promise<DispatchRules>;
     /** 客户端执行器取件：所有等待唤醒的 queued 条目（最新在前） */
     static listPending(workspacePath: string): Promise<DispatchRecord[]>;
+    /**
+     * 跨工作区取件（配置 dispatch.crossWorkspace 开启时由执行器调用）：
+     * 扫全部工作区文档，聚合各自派发队列里的 queued 条目（附 workspacePath 供路由会话）。
+     * 单个派发文件损坏时降级跳过，绝不抛错。
+     */
+    static listPendingAllWorkspaces(): Promise<Array<{
+        workspacePath: string;
+        record: DispatchRecord;
+    }>>;
     static listLog(workspacePath: string, limit?: number): Promise<DispatchRecord[]>;
     /**
      * 回执/处置：queued / would-dispatch → sent / failed / ignored；tripped（已熔断）→ ignored（人工确认后消除告警）。

@@ -21,11 +21,50 @@ interface PendingDispatchEntry {
   hop: number;
 }
 
+interface CrossWorkspacePendingEntry {
+  workspacePath: string;
+  record: PendingDispatchEntry;
+}
+
+/** 插件配置（宿主注入，经 REST 暴露）：crossWorkspaceDispatch 默认关闭 */
+let crossWorkspaceEnabled: boolean | null = null;
+async function isCrossWorkspaceEnabled(): Promise<boolean> {
+  if (crossWorkspaceEnabled === null) {
+    try {
+      const res = await fetch(`${API_BASE}/dispatch/config`, { cache: "no-store" });
+      const json = (await res.json()) as { ok: boolean; data?: { crossWorkspaceDispatch?: boolean } };
+      crossWorkspaceEnabled = json?.data?.crossWorkspaceDispatch === true;
+    } catch {
+      crossWorkspaceEnabled = false;
+    }
+  }
+  return crossWorkspaceEnabled;
+}
+
+/** 拉取任务详情并构造派发提示词（跨工作区时显式带上工作区根目录） */
+async function buildPrompt(workspacePath: string, entry: PendingDispatchEntry): Promise<string | null> {
+  const listRes = await fetch(`${API_BASE}/list?workspacePath=${encodeURIComponent(workspacePath)}`, {
+    cache: "no-store",
+  });
+  const listJson = (await listRes.json()) as {
+    ok: boolean;
+    data?: { tasks?: Array<{ id: string; title: string; description?: string }> };
+  };
+  const task = listJson?.data?.tasks?.find((t) => t.id === entry.taskId);
+  if (!task) return null;
+  return `[自动派发] 请执行工作区就绪任务 [${task.id}]: "${task.title}"。
+【工作区根目录】：${workspacePath}
+${task.description ? `任务详情：\n${task.description}\n\n` : ""}请先用 workspace_task 的 update 把状态置为 in_progress（会自动获取认领锁），完成后用 conclude 登记执行结论与交付物。`;
+}
+
 /**
  * 自动派发执行器（宿主算、客户端发）：
  * 后台轮询宿主引擎产生的 queued 条目，经统一派发通道（dispatch-agent.ts）
  * 注入提示词唤醒 Agent，随后置任务 in_progress（触发认领锁）并向宿主 ack 回执。
  * 失败标 failed 不静默重试。
+ *
+ * 轮询范围：默认只盯当前活跃工作区；插件配置 dispatch.crossWorkspace=true
+ * 时改为轮询全部工作区（/dispatch/pending/all），并按目标工作区 cwd 路由会话。
  */
 function startDispatchExecutor(ctx: ClientContext): () => void {
   let ticking = false;
@@ -37,50 +76,54 @@ function startDispatchExecutor(ctx: ClientContext): () => void {
       body: JSON.stringify({ workspacePath, id, status }),
     }).catch(() => {});
 
+  /** 派发一条：构造提示词 → 送进会话 → 置 in_progress → ack */
+  const dispatchOne = async (workspacePath: string, entry: PendingDispatchEntry, workspaceId?: string) => {
+    const prompt = await buildPrompt(workspacePath, entry);
+    if (!prompt) {
+      await ack(workspacePath, entry.id, "failed");
+      return;
+    }
+    const sent = await dispatchPromptToAgent(prompt, { workspaceId, workspacePath });
+    if (!sent) {
+      await ack(workspacePath, entry.id, "failed");
+      return;
+    }
+    await fetch(`${API_BASE}/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspacePath, taskId: entry.taskId, status: "in_progress" }),
+    }).catch(() => {});
+    await ack(workspacePath, entry.id, "sent");
+  };
+
   const tick = async (): Promise<void> => {
     if (ticking) return;
     ticking = true;
     try {
       const ws = resolveActiveWorkspace(undefined, undefined);
       const workspacePath = ws.path;
+
+      // 跨工作区模式：取全部工作区的 queued（每轮最多派 1 条，尊重注意力节流）
+      if (workspacePath && (await isCrossWorkspaceEnabled())) {
+        const allRes = await fetch(`${API_BASE}/dispatch/pending/all`, { cache: "no-store" });
+        if (allRes.ok) {
+          const allJson = (await allRes.json()) as { ok: boolean; data?: CrossWorkspacePendingEntry[] };
+          const target = allJson?.data?.[0];
+          if (target) {
+            await dispatchOne(target.workspacePath, target.record);
+            return;
+          }
+        }
+      }
+
+      // 默认模式：只盯当前活跃工作区
       if (!workspacePath) return;
       const query = `?workspacePath=${encodeURIComponent(workspacePath)}`;
-
       const pendingRes = await fetch(`${API_BASE}/dispatch/pending${query}`, { cache: "no-store" });
       const pendingJson = (await pendingRes.json()) as { ok: boolean; data?: PendingDispatchEntry[] };
       const entry = pendingJson?.data?.[0];
       if (!entry) return;
-
-      // 取任务详情构造派发提示词
-      const listRes = await fetch(`${API_BASE}/list${query}`, { cache: "no-store" });
-      const listJson = (await listRes.json()) as {
-        ok: boolean;
-        data?: { tasks?: Array<{ id: string; title: string; description?: string }> };
-      };
-      const task = listJson?.data?.tasks?.find((t) => t.id === entry.taskId);
-      if (!task) {
-        await ack(workspacePath, entry.id, "failed");
-        return;
-      }
-
-      const prompt = `[自动派发] 请执行工作区就绪任务 [${task.id}]: "${task.title}"。\n${
-        task.description ? `任务详情：\n${task.description}\n\n` : ""
-      }请先用 workspace_task 的 update 把状态置为 in_progress（会自动获取认领锁），完成后用 conclude 登记执行结论与交付物。`;
-
-      // 统一派发通道：会话解析 + binding.prompt / scoped conversation.send
-      const sent = await dispatchPromptToAgent(prompt, { workspaceId: ws.id });
-      if (!sent) {
-        await ack(workspacePath, entry.id, "failed");
-        return;
-      }
-
-      // 唤醒成功：置 in_progress（宿主自动认领锁），再回执
-      await fetch(`${API_BASE}/update`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspacePath, taskId: entry.taskId, status: "in_progress" }),
-      }).catch(() => {});
-      await ack(workspacePath, entry.id, "sent");
+      await dispatchOne(workspacePath, entry, ws.id);
     } catch {
       // 网络抖动等静默跳过，下一轮再试
     } finally {

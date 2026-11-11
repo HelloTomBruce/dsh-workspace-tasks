@@ -3,6 +3,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import { TaskStore } from "../store/task-store.ts";
 import { DispatchEngine } from "../store/dispatch.ts";
 import { listGlobalOverview } from "../store/global.ts";
+import { isCrossWorkspaceDispatchEnabled } from "../store/dispatch-config.ts";
 import type { DispatchMode } from "../store/dispatch.ts";
 import type { TaskPriority, TaskStatus } from "../store/types.ts";
 
@@ -503,6 +504,29 @@ export function registerTaskApis(ctx: Context): () => void {
         if (pathname === `${API_BASE}/dispatch/pending` && req.method === "GET") {
           const workspacePath = urlObj.searchParams.get("workspacePath") || process.cwd();
           const pending = await DispatchEngine.listPending(workspacePath);
+          sendJson(res, 200, { ok: true, data: pending });
+          return;
+        }
+
+        // 插件级配置（cordis.patch.yml 注入）：客户端执行器据此决定是否轮询全部工作区
+        if (pathname === `${API_BASE}/dispatch/config` && req.method === "GET") {
+          sendJson(res, 200, {
+            ok: true,
+            data: { crossWorkspaceDispatch: isCrossWorkspaceDispatchEnabled() },
+          });
+          return;
+        }
+
+        // 跨工作区取件：聚合全部工作区派发队列的 queued 条目（附 workspacePath）
+        if (pathname === `${API_BASE}/dispatch/pending/all` && req.method === "GET") {
+          if (!isCrossWorkspaceDispatchEnabled()) {
+            sendJson(res, 403, {
+              ok: false,
+              error: "crossWorkspace dispatch is disabled (config dispatch.crossWorkspace)",
+            });
+            return;
+          }
+          const pending = await DispatchEngine.listPendingAllWorkspaces();
           sendJson(res, 200, { ok: true, data: pending });
           return;
         }
