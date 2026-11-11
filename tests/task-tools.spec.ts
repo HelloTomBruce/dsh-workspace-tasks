@@ -468,4 +468,192 @@ describe("registerTaskTools", () => {
       })
     ).rejects.toThrow(/refWorkspacePath/);
   });
+
+  it("claim/lease：自动认领、结构化冲突、释放与就绪过滤", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: {
+        register: (tool: any) => {
+          registeredTool = tool;
+          return () => {};
+        },
+      },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    // 两个并行会话：alpha 与 beta
+    const execAlpha = { agent: { session: { header: { id: "session-alpha-0001" } } } };
+    const execBeta = { agent: { session: { header: { id: "session-beta-0002" } } } };
+
+    const createRes = await registeredTool.execute({
+      action: "create",
+      title: "Shared task",
+      workspacePath: mockWorkspace,
+    });
+    const taskId = createRes.task.id;
+
+    // alpha 转入 in_progress → 自动认领，owner 带会话短码
+    const updateRes = await registeredTool.execute(
+      { action: "update", taskId, status: "in_progress", workspacePath: mockWorkspace },
+      execAlpha
+    );
+    expect(updateRes.ok).toBe(true);
+    expect(updateRes.task.claim.owner).toBe("agent@sessiona");
+    expect(updateRes.task.claim.sessionHint).toBe("session-alpha-0001");
+    expect(() => assertLosslessJson(updateRes, "claimUpdate")).not.toThrow();
+
+    // beta 认领同一任务 → 结构化冲突响应（不抛异常）
+    const conflictRes = await registeredTool.execute(
+      { action: "claim", taskId, workspacePath: mockWorkspace },
+      execBeta
+    );
+    expect(conflictRes.ok).toBe(false);
+    expect(conflictRes.conflict).toBe(true);
+    expect(conflictRes.claim.owner).toBe("agent@sessiona");
+    expect(conflictRes.message).toMatch(/Back off/);
+    expect(() => assertLosslessJson(conflictRes, "conflict")).not.toThrow();
+
+    // beta 经 update 抢锁同样得到结构化冲突
+    const conflictUpdate = await registeredTool.execute(
+      { action: "update", taskId, status: "in_progress", workspacePath: mockWorkspace },
+      execBeta
+    );
+    expect(conflictUpdate.ok).toBe(false);
+    expect(conflictUpdate.conflict).toBe(true);
+
+    // beta 视角的就绪列表排除 alpha 持有的任务；alpha 视角仍可见
+    const readyBeta = await registeredTool.execute(
+      { action: "get_ready_tasks", workspacePath: mockWorkspace },
+      execBeta
+    );
+    expect(readyBeta.tasks.map((t: any) => t.id)).not.toContain(taskId);
+    const readyAlpha = await registeredTool.execute(
+      { action: "get_ready_tasks", workspacePath: mockWorkspace },
+      execAlpha
+    );
+    expect(readyAlpha.tasks.map((t: any) => t.id)).toContain(taskId);
+
+    // beta 不能释放 alpha 的锁
+    const releaseBeta = await registeredTool.execute(
+      { action: "release", taskId, workspacePath: mockWorkspace },
+      execBeta
+    );
+    expect(releaseBeta.ok).toBe(false);
+    expect(releaseBeta.conflict).toBe(true);
+
+    // alpha 本人释放成功
+    const releaseAlpha = await registeredTool.execute(
+      { action: "release", taskId, workspacePath: mockWorkspace },
+      execAlpha
+    );
+    expect(releaseAlpha.ok).toBe(true);
+    expect(releaseAlpha.task.claim).toBeUndefined();
+
+    // 无会话信息时 owner 退化为 'agent'
+    const claimPlain = await registeredTool.execute({
+      action: "claim",
+      taskId,
+      workspacePath: mockWorkspace,
+    });
+    expect(claimPlain.ok).toBe(true);
+    expect(claimPlain.task.claim.owner).toBe("agent");
+    expect(claimPlain.task.claim.sessionHint).toBeUndefined();
+  });
+
+  it("claim：leaseMinutes 越界收敛到上限 240", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: {
+        register: (tool: any) => {
+          registeredTool = tool;
+          return () => {};
+        },
+      },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    const createRes = await registeredTool.execute({
+      action: "create",
+      title: "Lease clamp task",
+      workspacePath: mockWorkspace,
+    });
+    const claimRes = await registeredTool.execute({
+      action: "claim",
+      taskId: createRes.task.id,
+      leaseMinutes: 9999,
+      workspacePath: mockWorkspace,
+    });
+    expect(claimRes.ok).toBe(true);
+    const leaseMs = new Date(claimRes.task.claim.leaseUntil).getTime() - Date.now();
+    expect(leaseMs).toBeLessThanOrEqual(240 * 60_000);
+    expect(leaseMs).toBeGreaterThan(230 * 60_000);
+  });
+
+  it("request_approval：发起票拟、任务挂起、重复请求结构化拒绝", async () => {
+    let registeredTool: any = null;
+    const mockCtx: any = {
+      tools: {
+        register: (tool: any) => {
+          registeredTool = tool;
+          return () => {};
+        },
+      },
+      systemPrompt: { section: () => () => {} },
+    };
+    registerTaskTools(mockCtx);
+
+    const createRes = await registeredTool.execute({
+      action: "create",
+      title: "Approval needy task",
+      workspacePath: mockWorkspace,
+    });
+    const taskId = createRes.task.id;
+    await registeredTool.execute({ action: "update", taskId, status: "in_progress", workspacePath: mockWorkspace });
+
+    // 发起票拟
+    const reqRes = await registeredTool.execute({
+      action: "request_approval",
+      taskId,
+      approvalTitle: "删除 legacy 表？",
+      approvalDetail: "涉及 3.2 万行",
+      options: ["删除并迁移", "保留旧表"],
+      workspacePath: mockWorkspace,
+    });
+    expect(reqRes.ok).toBe(true);
+    expect(reqRes.approval.status).toBe("pending");
+    expect(reqRes.task.status).toBe("blocked");
+    expect(reqRes.message).toMatch(/STOP/);
+    expect(reqRes.message).toMatch(/do NOT poll/);
+    expect(() => assertLosslessJson(reqRes, "requestApproval")).not.toThrow();
+
+    // 重复请求 → 结构化 pending-exists（不抛异常）
+    const dupRes = await registeredTool.execute({
+      action: "request_approval",
+      taskId,
+      approvalTitle: "另一个问题",
+      options: ["甲", "乙"],
+      workspacePath: mockWorkspace,
+    });
+    expect(dupRes.ok).toBe(false);
+    expect(dupRes.reason).toBe("pending-exists");
+    expect(() => assertLosslessJson(dupRes, "dupApproval")).not.toThrow();
+
+    // 参数校验：选项不足 2 个
+    await expect(
+      registeredTool.execute({
+        action: "request_approval",
+        taskId,
+        approvalTitle: "只有一个选项的问题",
+        options: ["唯一"],
+        workspacePath: mockWorkspace,
+      })
+    ).rejects.toThrow(/at least 2/);
+
+    // 工具不暴露 resolve/reject——批红权只在人手里（UI/REST）
+    expect(registeredTool.parameters.properties.action.enum).not.toContain("resolve_approval");
+    expect(registeredTool.parameters.properties.action.enum).not.toContain("reject_approval");
+    expect(registeredTool.parameters.properties.action.enum).toContain("request_approval");
+  });
 });

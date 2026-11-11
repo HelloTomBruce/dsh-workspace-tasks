@@ -24,12 +24,50 @@ DSH（DeepSeek Harness）工作区任务与执行结论管理插件。
 | 查询过程 | `get_task_history` | `GET /__dsh-tasks__/history?taskId=` | 检查点事件 + 决策日志，最新在前 |
 | 跨工作区引用 | `link_trace` | `POST /__dsh-tasks__/trace` | 只读引用，同引用去重 |
 | 解析引用 | — | `GET /__dsh-tasks__/trace?taskId=` | 填充来源标题/结论摘要，悬挂降级 |
+| 认领/释放任务锁 | `claim` / `release` | `POST /__dsh-tasks__/claim`、`POST /__dsh-tasks__/release` | 租约锁（默认 60 分钟，惰性过期），冲突返回结构化响应 |
+| 请求拍板（票拟） | `request_approval` | `POST /__dsh-tasks__/approval` | 任务挂起 blocked，等待人工批红 |
+| 批红/驳回 | —（仅 UI，Agent 不可自我批准） | `POST /__dsh-tasks__/approval/resolve`、`POST /__dsh-tasks__/approval/reject` | 批准自动落 DecisionRecord 并恢复任务 |
+| 派发规则读写 | —（UI 配置） | `GET/POST /__dsh-tasks__/dispatch/rules` | 三态模式/优先级/排除标签/白名单/并发上限 |
+| 派发取件与回执 | —（客户端执行器） | `GET /__dsh-tasks__/dispatch/pending`、`POST /__dsh-tasks__/dispatch/ack`、`POST /__dsh-tasks__/dispatch/ignore` | queued 取件、sent/failed/ignored 回执 |
+| 派发记录 | — | `GET /__dsh-tasks__/dispatch/log?limit=` | 最近 200 条，含 hop 链与状态 |
+
+### 🖋️ 票拟→批红：决策请求闭环（Approval Loop）
+
+Agent 遇到必须人拍板的事（删数据、停服、花钱、对外发布、改产品方向、密钥/权限变更）时，调 `request_approval` 提交一条带 ≥2 个结构化选项的「票拟」：
+
+1. **挂起零消耗**：任务转入 `blocked`，无任何进程、无轮询（SOP 明确禁止 Agent 等候），认领锁保留防止被其他会话捡走；
+2. **批红**：看板出现 🔔 待拍板横幅与批红卡片，人点选一个选项（或驳回备注）——**resolve/reject 只走 REST（UI），Agent 工具永不开放，防止自我批准**；
+3. **自动落决策**：批准即生成一条不可改写 `DecisionRecord`（标题「拍板：…」，含选中选项原话、未选项进入 alternatives、`actor: human`），审批记录回链 `decisionId`，任务恢复原状态（通常 `in_progress`）无缝续跑；驳回不落决策，任务保持 blocked 等 Agent 重新规划。
+
+### 🔒 认领锁（Claim/Lease）：同一件事只一个负责人
+
+多 Agent 会话并行时，认领即加锁：`update status→in_progress` 自动认领（owner 从会话 ID 派生 `agent@<短码>`），冲突返回结构化响应（不抛异常）让 Agent 主动退让；同一 owner 重入即续租；`conclude` 自动释放；租约过期在读取路径**惰性释放（无定时器）**；`get_ready_tasks` 自动排除被他人活跃锁定的任务。看板显示 🔒 锁 Chip，人可强制释放死锁。
+
+### ⚡ 就绪任务自动派发（Fast Path 事件驱动）
+
+架构「**宿主算、客户端发**」：任务完成（conclude/done）触发宿主侧纯规则引擎（零 Token），客户端执行器负责唤醒 Agent。
+
+1. **触发**：`TaskStore` 完成事件钩子（工具/REST/UI 手动全路径覆盖）→ 引擎 `evaluate()`：模式关闭或并发闸门满（默认 `maxConcurrent=1`）即静默退出；否则按规则过滤就绪任务（优先级/排除标签/白名单）、去重（已派发未完成/已观察的不重复）、取队首并记录 hop 链深度；
+2. **三态模式**：`👁️ 观察`（默认，只记录「本会派发什么」不进队列——验证规则靠谱再切自动）/ `⚡ 自动`（标记 queued 等待执行器取件）/ `⏸️ 关闭`；
+3. **唤醒**：客户端后台轮询（30s，GUI 启动即活不依赖看板打开）取 queued 条目，复用手动派发通道（composer 注入提示词）唤醒 Agent，置 `in_progress` 触发认领锁后 `ack` 回执；失败标 `failed` 不静默重试；
+4. **可见可干预**：看板头部三态开关 + 规则摘要（hover），观察横幅一键「立即执行/忽略」，📜 派发记录区展示最近 20 条（触发源、hop、状态徽标）。规则与记录持久化在 `~/.dsh/storages/workspace-tasks/<工作区>-dispatch.json`，不进 git。
+
+### 🛡️ 两道纯规则保险（Watchdog & TTL）
+
+- **停滞检测**：`in_progress` 任务超过 `staleHours`（默认 24 小时，可经派发规则接口调整）无新检查点即判定停滞——看板顶部黄条提醒，支持一键「降级回待办」（同时释放认领锁，重新进入就绪队列）；
+- **派发 TTL 熔断**：自动派发链每次唤醒 `hop+1`（人工干预不清零，与网络包 TTL 同语义），超过 **8 层**即熔断——不再派发，记录 `tripped` 并把目标任务转 `blocked` 斩断失控链，看板顶部红色告警等人工处置（去处理/知道了）；
+- **可派发语义对齐**：阻塞待拍板与待验收（review）的任务是「等人的」而非「等 Agent 的」，自动派发引擎与全局中台的就绪分组都只统计 `todo / in_progress（未认领续跑）`，同一件事绝不重复打扰你。
+
+### 🗂️ 任务中台（跨工作区全局看板）
+
+左侧菜单「插件」区新增「任务中台」入口，点击在主区域打开全宽只读视图：总览计数条 + 工作区卡片（按最近活跃排序），分组呈现🔔待拍板（直接列出票拟标题）/⚡进行中（带锁信息）/🔍待验收/✅已完成待归档/🔒阻塞/🎯就绪预览。点击任意任务行自动打开右栏工作区看板并滚动定位到对应卡片。数据来自 `GET /__dsh-tasks__/global`（扫描本地存储目录，坏文件 dangling 降级）。
 
 ### 与 AI 对话示例（痕迹场景）
 
 * *"TASK-003 里我们改用了原子写入方案，请记录这个决策并取代之前的 DEC-xxxx，理由是避免半写。"*
 * *"给我看 TASK-003 的完整过程历史和所有决策演进链。"*
 * *"把 /path/to/other-workspace 的 TASK-002 作为设计依据引用到 TASK-005 上。"*
+* *"要不要删除 legacy 表我拿不准——发个拍板请求，选项是「删除并迁移」和「保留旧表」。"*（看板出现待批卡片，你点一下即可批红）
 
 ---
 

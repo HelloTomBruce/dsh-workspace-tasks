@@ -76,3 +76,26 @@ export function RefreshIcon(props: SVGProps<SVGSVGElement>) {
     createElement("path", { d: "M13.5 2.5v3.5h-3.5" })
   );
 }
+
+/** 任务中台图标：四格总览（跨工作区聚合视图） */
+export function GlobalBoardIcon(props: SVGProps<SVGSVGElement>) {
+  const size = (props && (props as { size?: number }).size) || 18;
+  return createElement(
+    "svg",
+    {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 1.6,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      ...props,
+    },
+    createElement("rect", { x: 3, y: 3, width: 8, height: 8, rx: 2 }),
+    createElement("rect", { x: 13, y: 3, width: 8, height: 5, rx: 2 }),
+    createElement("rect", { x: 13, y: 10, width: 8, height: 11, rx: 2 }),
+    createElement("rect", { x: 3, y: 13, width: 8, height: 8, rx: 2 })
+  );
+}

@@ -355,4 +355,371 @@ describe("TaskStore", () => {
     expect(await TaskStore.addTraceRef(mockWorkspace, task.id, { workspacePath: "/tmp/x", taskId: " " })).toBeNull();
     expect(await TaskStore.addTraceRef(mockWorkspace, "TASK-999", { workspacePath: "/tmp/x", taskId: "TASK-001" })).toBeNull();
   });
+
+  describe("claim/lease 认领锁", () => {
+    it("update 转入 in_progress 时自动加锁并落 checkpoint", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Claimable task" });
+      const updated = await TaskStore.updateTask(
+        mockWorkspace,
+        task.id,
+        { status: "in_progress" },
+        { claimOwner: "agent@sess-a", sessionHint: "sess-a-full" }
+      );
+
+      expect(updated?.claim?.owner).toBe("agent@sess-a");
+      expect(updated?.claim?.sessionHint).toBe("sess-a-full");
+      expect(new Date(updated!.claim!.leaseUntil).getTime()).toBeGreaterThan(Date.now());
+
+      const history = await TaskStore.getTaskHistory(mockWorkspace, task.id);
+      const claimEvent = history.find((h) => h.field === "claim");
+      expect(claimEvent).toBeDefined();
+      expect(claimEvent?.from).toBe("null");
+      expect(JSON.parse(claimEvent!.to).owner).toBe("agent@sess-a");
+    });
+
+    it("他人活跃锁冲突：updateTask 抛 ClaimConflictError，claimTask 返回结构化 conflict", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Contended task" });
+      await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-a" });
+
+      await expect(
+        TaskStore.updateTask(mockWorkspace, task.id, { status: "in_progress" }, { claimOwner: "agent@sess-b" })
+      ).rejects.toMatchObject({ name: "ClaimConflictError", taskId: task.id });
+
+      const result = await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-b" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("conflict");
+        expect(result.claim?.owner).toBe("agent@sess-a");
+      }
+
+      // 冲突不会污染任务状态
+      const { tasks } = await TaskStore.listTasks(mockWorkspace);
+      expect(tasks[0]?.status).toBe("todo");
+      expect(tasks[0]?.claim?.owner).toBe("agent@sess-a");
+    });
+
+    it("同一 owner 重复认领即续租：claimedAt 保留，leaseUntil 延长", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Renew task" });
+      const first = await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-a", leaseMinutes: 1 });
+      expect(first.ok).toBe(true);
+      const firstClaim = first.ok ? first.task.claim! : undefined;
+
+      // 人为把租约拨快到即将过期，再续租
+      const doc = await TaskStore.load(mockWorkspace);
+      const t = doc.tasks.find((x) => x.id === task.id)!;
+      t.claim!.leaseUntil = new Date(Date.now() + 5_000).toISOString();
+      await TaskStore.save(mockWorkspace, doc);
+
+      const renewed = await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-a", leaseMinutes: 60 });
+      expect(renewed.ok).toBe(true);
+      if (renewed.ok) {
+        expect(renewed.task.claim?.claimedAt).toBe(firstClaim?.claimedAt);
+        expect(new Date(renewed.task.claim!.leaseUntil).getTime()).toBeGreaterThan(Date.now() + 50 * 60_000);
+      }
+    });
+
+    it("租约过期后惰性释放：他人可直接认领，无需任何定时器", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Expired lease task" });
+      await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-a" });
+
+      // 构造已过期租约
+      const doc = await TaskStore.load(mockWorkspace);
+      const t = doc.tasks.find((x) => x.id === task.id)!;
+      t.claim!.leaseUntil = new Date(Date.now() - 1_000).toISOString();
+      await TaskStore.save(mockWorkspace, doc);
+
+      const result = await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-b" });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.task.claim?.owner).toBe("agent@sess-b");
+    });
+
+    it("conclude 自动释放认领锁并落 checkpoint", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Conclude release task" });
+      await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-a" });
+
+      const concluded = await TaskStore.addConclusion(mockWorkspace, task.id, { summary: "done" });
+      expect(concluded?.status).toBe("done");
+      expect(concluded?.claim).toBeUndefined();
+
+      const history = await TaskStore.getTaskHistory(mockWorkspace, task.id);
+      const releaseEvent = history.find((h) => h.field === "claim" && h.to === "null");
+      expect(releaseEvent).toBeDefined();
+    });
+
+    it("releaseTask：owner 匹配释放 / 他人未 force 冲突 / force 强制释放 / 无锁幂等", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Release task" });
+
+      // 无锁幂等
+      const noop = await TaskStore.releaseTask(mockWorkspace, task.id, { owner: "agent@sess-a" });
+      expect(noop.ok).toBe(true);
+
+      await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-a" });
+
+      // 他人未 force → 冲突
+      const conflict = await TaskStore.releaseTask(mockWorkspace, task.id, { owner: "agent@sess-b" });
+      expect(conflict.ok).toBe(false);
+      if (!conflict.ok) expect(conflict.reason).toBe("conflict");
+
+      // force → 强制释放（UI 人力解锁死锁场景）
+      const forced = await TaskStore.releaseTask(mockWorkspace, task.id, { owner: "human", force: true });
+      expect(forced.ok).toBe(true);
+      if (forced.ok) expect(forced.task.claim).toBeUndefined();
+
+      // owner 本人释放
+      await TaskStore.claimTask(mockWorkspace, task.id, { owner: "agent@sess-a" });
+      const own = await TaskStore.releaseTask(mockWorkspace, task.id, { owner: "agent@sess-a" });
+      expect(own.ok).toBe(true);
+      if (own.ok) expect(own.task.claim).toBeUndefined();
+    });
+
+    it("getReadyTasks 排除被他人活跃锁定的任务，本人锁与过期锁不影响", async () => {
+      const t1 = await TaskStore.createTask(mockWorkspace, { title: "Locked by other" });
+      const t2 = await TaskStore.createTask(mockWorkspace, { title: "Locked by me" });
+      const t3 = await TaskStore.createTask(mockWorkspace, { title: "Expired lock" });
+      const t4 = await TaskStore.createTask(mockWorkspace, { title: "Free task" });
+
+      await TaskStore.claimTask(mockWorkspace, t1.id, { owner: "agent@sess-a" });
+      await TaskStore.claimTask(mockWorkspace, t2.id, { owner: "agent@sess-b" });
+      await TaskStore.claimTask(mockWorkspace, t3.id, { owner: "agent@sess-a" });
+
+      // t3 租约过期
+      const doc = await TaskStore.load(mockWorkspace);
+      doc.tasks.find((x) => x.id === t3.id)!.claim!.leaseUntil = new Date(Date.now() - 1_000).toISOString();
+      await TaskStore.save(mockWorkspace, doc);
+
+      // 以 sess-b 视角：t1 被他人锁定排除，t2 本人锁保留，t3 过期锁保留，t4 自由保留
+      const ready = await TaskStore.getReadyTasks(mockWorkspace, { owner: "agent@sess-b" });
+      const ids = ready.map((t) => t.id);
+      expect(ids).not.toContain(t1.id);
+      expect(ids).toContain(t2.id);
+      expect(ids).toContain(t3.id);
+      expect(ids).toContain(t4.id);
+
+      // 无 owner 视角（如 UI 就绪横幅）：所有活跃锁任务都排除
+      const readyNoOwner = await TaskStore.getReadyTasks(mockWorkspace);
+      const idsNoOwner = readyNoOwner.map((t) => t.id);
+      expect(idsNoOwner).not.toContain(t1.id);
+      expect(idsNoOwner).not.toContain(t2.id);
+      expect(idsNoOwner).toContain(t3.id);
+      expect(idsNoOwner).toContain(t4.id);
+    });
+
+    it("状态转入 blocked 保留锁，转入 todo/review/archived 释放锁", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Status lock task" });
+      await TaskStore.updateTask(mockWorkspace, task.id, { status: "in_progress" }, { claimOwner: "agent@sess-a" });
+
+      // blocked 保留（等待人工拍板期间防止被捡走）
+      const blocked = await TaskStore.updateTask(mockWorkspace, task.id, { status: "blocked" });
+      expect(blocked?.claim?.owner).toBe("agent@sess-a");
+
+      // 恢复 in_progress（同 owner 续租）
+      const resumed = await TaskStore.updateTask(
+        mockWorkspace,
+        task.id,
+        { status: "in_progress" },
+        { claimOwner: "agent@sess-a" }
+      );
+      expect(resumed?.claim?.owner).toBe("agent@sess-a");
+
+      // todo 释放
+      const backToTodo = await TaskStore.updateTask(mockWorkspace, task.id, { status: "todo" });
+      expect(backToTodo?.claim).toBeUndefined();
+    });
+  });
+
+  describe("审批闭环（票拟→批红）", () => {
+    it("requestApproval：任务转 blocked 并捕获 resumeStatus，落 checkpoint，blocked 保留 claim", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Risky task" });
+      await TaskStore.updateTask(mockWorkspace, task.id, { status: "in_progress" }, { claimOwner: "agent@sess-a" });
+
+      const result = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "是否删除旧数据表？",
+        detail: "迁移需要清空 legacy_users 表，涉及 3.2 万行。",
+        options: ["删除并继续迁移", "保留旧表只做增量"],
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.approval.status).toBe("pending");
+      expect(result.approval.resumeStatus).toBe("in_progress");
+      expect(result.approval.options.length).toBe(2);
+      expect(result.task.status).toBe("blocked");
+      // blocked 期间 claim 保留，防止别的会话把待批任务捡走
+      expect(result.task.claim?.owner).toBe("agent@sess-a");
+
+      const history = await TaskStore.getTaskHistory(mockWorkspace, task.id);
+      expect(history.some((h) => h.field === "approval.request")).toBe(true);
+      expect(history.some((h) => h.field === "status" && h.to === '"blocked"')).toBe(true);
+    });
+
+    it("同一任务同时只允许一条 pending；终态任务与非法输入被拒绝", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Dedup task" });
+      const first = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "问题 A",
+        options: ["是", "否"],
+      });
+      expect(first.ok).toBe(true);
+
+      const dup = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "问题 B",
+        options: ["甲", "乙"],
+      });
+      expect(dup.ok).toBe(false);
+      if (!dup.ok) expect(dup.reason).toBe("pending-exists");
+
+      // 选项不足 2 个 / 空标题
+      expect(
+        (await TaskStore.requestApproval(mockWorkspace, task.id, { title: " ", options: ["a", "b"] })).ok
+      ).toBe(false);
+      const doneTask = await TaskStore.createTask(mockWorkspace, { title: "Done task" });
+      await TaskStore.addConclusion(mockWorkspace, doneTask.id, { summary: "finished" });
+      const onDone = await TaskStore.requestApproval(mockWorkspace, doneTask.id, {
+        title: "太晚的问题",
+        options: ["x", "y"],
+      });
+      expect(onDone.ok).toBe(false);
+      if (!onDone.ok) expect(onDone.reason).toBe("invalid");
+    });
+
+    it("resolveApproval 批准：自动落 DecisionRecord（含选项原话与未选项）、回链、状态恢复、checkpoint 齐全", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Approval flow task" });
+      await TaskStore.updateTask(mockWorkspace, task.id, { status: "in_progress" }, { claimOwner: "agent@sess-a" });
+      const req = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "改用 JSON 存储？",
+        detail: "SQLite 引入原生依赖，部署成本高。",
+        options: ["改用 JSON 文件", "坚持 SQLite", "换 better-sqlite3"],
+      });
+      if (!req.ok) throw new Error("request failed");
+      const approvalId = req.approval.id;
+
+      const resolved = await TaskStore.resolveApproval(mockWorkspace, task.id, approvalId, {
+        optionId: "opt-1",
+        note: "部署简单优先",
+      });
+
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) return;
+      // 审批状态与回链
+      expect(resolved.approval.status).toBe("approved");
+      expect(resolved.approval.resolvedOptionId).toBe("opt-1");
+      expect(resolved.approval.decisionId).toBe(resolved.decision!.id);
+      // 状态恢复 resumeStatus，claim 保留
+      expect(resolved.task.status).toBe("in_progress");
+      expect(resolved.task.claim?.owner).toBe("agent@sess-a");
+      // 决策自包含：标题、选项原话、背景、批注、未选项、actor=human
+      const dec = resolved.decision!;
+      expect(dec.title).toBe("拍板：改用 JSON 存储？");
+      expect(dec.rationale).toContain("批准选项「改用 JSON 文件」");
+      expect(dec.rationale).toContain("SQLite 引入原生依赖");
+      expect(dec.rationale).toContain("部署简单优先");
+      expect(dec.alternatives).toEqual(["坚持 SQLite", "换 better-sqlite3"]);
+      expect(dec.actor).toBe("human");
+
+      // 决策进入任务决策日志（append-only 头部）
+      const decisions = await TaskStore.listDecisions(mockWorkspace, task.id);
+      expect(decisions[0]?.id).toBe(dec.id);
+
+      // checkpoint 齐全：approval.resolve + decision + status 恢复
+      const history = await TaskStore.getTaskHistory(mockWorkspace, task.id);
+      expect(history.some((h) => h.field === "approval.resolve" && h.to.includes('"approved"'))).toBe(true);
+      expect(history.some((h) => h.field === "decision" && h.to.includes(dec.id))).toBe(true);
+      expect(history.some((h) => h.field === "status" && h.to === '"in_progress"')).toBe(true);
+
+      // 已批准的请求不能再次批红
+      const again = await TaskStore.resolveApproval(mockWorkspace, task.id, approvalId, { optionId: "opt-2" });
+      expect(again.ok).toBe(false);
+      if (!again.ok) expect(again.reason).toBe("not-pending");
+    });
+
+    it("resolveApproval：非法选项与不存在审批的防护", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Guard approval task" });
+      const req = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "选一个",
+        options: ["A", "B"],
+      });
+      if (!req.ok) throw new Error("request failed");
+
+      const badOption = await TaskStore.resolveApproval(mockWorkspace, task.id, req.approval.id, {
+        optionId: "opt-99",
+      });
+      expect(badOption.ok).toBe(false);
+      if (!badOption.ok) expect(badOption.reason).toBe("invalid-option");
+
+      const missing = await TaskStore.resolveApproval(mockWorkspace, task.id, "APR-000-x", { optionId: "opt-1" });
+      expect(missing.ok).toBe(false);
+      if (!missing.ok) expect(missing.reason).toBe("not-found");
+
+      // 防护失败不破坏原状态
+      const { tasks } = await TaskStore.listTasks(mockWorkspace);
+      expect(tasks[0]?.status).toBe("blocked");
+      expect(tasks[0]?.approvals?.[0]?.status).toBe("pending");
+    });
+
+    it("rejectApproval 驳回：不落决策、保持 blocked、记录备注", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Reject task" });
+      const req = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "对外发布 v2？",
+        options: ["立即发布", "下周发布"],
+      });
+      if (!req.ok) throw new Error("request failed");
+
+      const rejected = await TaskStore.rejectApproval(mockWorkspace, task.id, req.approval.id, {
+        note: "等合规评审结束再议",
+      });
+      expect(rejected.ok).toBe(true);
+      if (!rejected.ok) return;
+      expect(rejected.approval.status).toBe("rejected");
+      expect(rejected.approval.resolveNote).toBe("等合规评审结束再议");
+      expect(rejected.task.status).toBe("blocked");
+
+      // 不落任何决策
+      const decisions = await TaskStore.listDecisions(mockWorkspace, task.id);
+      expect(decisions.length).toBe(0);
+
+      // 驳回后可以发起新的请求（重新规划）
+      const second = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "只做内部灰度？",
+        options: ["灰度 10%", "暂停发布"],
+      });
+      expect(second.ok).toBe(true);
+    });
+
+    it("listPendingApprovals 跨任务收集待批请求", async () => {
+      const t1 = await TaskStore.createTask(mockWorkspace, { title: "Task one" });
+      const t2 = await TaskStore.createTask(mockWorkspace, { title: "Task two" });
+      await TaskStore.createTask(mockWorkspace, { title: "Task three" });
+
+      await TaskStore.requestApproval(mockWorkspace, t1.id, { title: "Q1", options: ["a", "b"] });
+      await TaskStore.requestApproval(mockWorkspace, t2.id, { title: "Q2", options: ["c", "d"] });
+
+      const pending = await TaskStore.listPendingApprovals(mockWorkspace);
+      expect(pending.length).toBe(2);
+      expect(pending.map((p) => p.taskId).sort()).toEqual([t1.id, t2.id]);
+      expect(pending[0]?.taskTitle).toBeTruthy();
+    });
+
+    it("批红尊重最新状态：待批期间被 conclude/archive 的任务不被复活", async () => {
+      const task = await TaskStore.createTask(mockWorkspace, { title: "Stale approval task" });
+      await TaskStore.updateTask(mockWorkspace, task.id, { status: "in_progress" }, { claimOwner: "agent@sess-a" });
+      const req = await TaskStore.requestApproval(mockWorkspace, task.id, {
+        title: "继续吗？",
+        options: ["继续", "停"],
+      });
+      if (!req.ok) throw new Error("request failed");
+
+      // 待批期间任务被人通过其他路径完成了
+      await TaskStore.addConclusion(mockWorkspace, task.id, { summary: "人工直接做完了" });
+
+      const resolved = await TaskStore.resolveApproval(mockWorkspace, task.id, req.approval.id, {
+        optionId: "opt-1",
+      });
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) return;
+      // 决策照常落盘（批红的价值仍在），但状态尊重 done，不复活为 in_progress
+      expect(resolved.decision).toBeDefined();
+      expect(resolved.task.status).toBe("done");
+      const decisions = await TaskStore.listDecisions(mockWorkspace, task.id);
+      expect(decisions[0]?.title).toBe("拍板：继续吗？");
+    });
+  });
 });

@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Context } from "@deepseek-ai/cordis";
 import { TaskStore } from "../store/task-store.ts";
+import { DispatchEngine } from "../store/dispatch.ts";
+import { listGlobalOverview } from "../store/global.ts";
+import type { DispatchMode } from "../store/dispatch.ts";
 import type { TaskPriority, TaskStatus } from "../store/types.ts";
 
 export const API_BASE = "/__dsh-tasks__";
@@ -311,6 +314,242 @@ export function registerTaskApis(ctx: Context): () => void {
             return;
           }
           sendJson(res, 200, { ok: true, data: refs });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/claim` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{
+            workspacePath?: string;
+            taskId: string;
+            owner?: string;
+            sessionHint?: string;
+            leaseMinutes?: number;
+          }>(raw);
+          if (!body || !body.taskId) {
+            sendJson(res, 400, { ok: false, error: "Missing 'taskId'" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const result = await TaskStore.claimTask(workspacePath, body.taskId, {
+            owner: body.owner?.trim() || "human",
+            sessionHint: body.sessionHint,
+            leaseMinutes: body.leaseMinutes,
+          });
+          if (!result.ok) {
+            sendJson(res, result.reason === "not-found" ? 404 : 409, {
+              ok: false,
+              error: result.reason === "not-found" ? "Task not found" : "Task actively claimed by another owner",
+              claim: result.claim ?? null,
+            });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: result.task });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/release` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{
+            workspacePath?: string;
+            taskId: string;
+            owner?: string;
+            force?: boolean;
+          }>(raw);
+          if (!body || !body.taskId) {
+            sendJson(res, 400, { ok: false, error: "Missing 'taskId'" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const result = await TaskStore.releaseTask(workspacePath, body.taskId, {
+            owner: body.owner?.trim() || "human",
+            force: body.force === true,
+          });
+          if (!result.ok) {
+            sendJson(res, result.reason === "not-found" ? 404 : 409, {
+              ok: false,
+              error: result.reason === "not-found" ? "Task not found" : "Task actively claimed by another owner",
+              claim: result.claim ?? null,
+            });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: result.task });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/approval` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{
+            workspacePath?: string;
+            taskId: string;
+            title: string;
+            detail?: string;
+            options: string[];
+          }>(raw);
+          if (!body || !body.taskId || !body.title?.trim() || !Array.isArray(body.options)) {
+            sendJson(res, 400, { ok: false, error: "Missing 'taskId', 'title' or 'options'" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const result = await TaskStore.requestApproval(workspacePath, body.taskId, {
+            title: body.title,
+            detail: body.detail,
+            options: body.options,
+          });
+          if (!result.ok) {
+            const statusMap: Record<string, number> = { "not-found": 404, "pending-exists": 409, invalid: 400 };
+            sendJson(res, statusMap[result.reason] ?? 400, { ok: false, error: result.reason });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: { approval: result.approval, task: result.task } });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/approval/resolve` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{
+            workspacePath?: string;
+            taskId: string;
+            approvalId: string;
+            optionId: string;
+            note?: string;
+            actor?: string;
+          }>(raw);
+          if (!body || !body.taskId || !body.approvalId || !body.optionId) {
+            sendJson(res, 400, { ok: false, error: "Missing 'taskId', 'approvalId' or 'optionId'" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const result = await TaskStore.resolveApproval(workspacePath, body.taskId, body.approvalId, {
+            optionId: body.optionId,
+            note: body.note,
+            actor: body.actor?.trim() || "human",
+          });
+          if (!result.ok) {
+            const statusMap: Record<string, number> = { "not-found": 404, "not-pending": 409, "invalid-option": 400 };
+            sendJson(res, statusMap[result.reason] ?? 400, { ok: false, error: result.reason });
+            return;
+          }
+          sendJson(res, 200, {
+            ok: true,
+            data: { approval: result.approval, decision: result.decision ?? null, task: result.task },
+          });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/approval/reject` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{
+            workspacePath?: string;
+            taskId: string;
+            approvalId: string;
+            note?: string;
+          }>(raw);
+          if (!body || !body.taskId || !body.approvalId) {
+            sendJson(res, 400, { ok: false, error: "Missing 'taskId' or 'approvalId'" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const result = await TaskStore.rejectApproval(workspacePath, body.taskId, body.approvalId, {
+            note: body.note,
+          });
+          if (!result.ok) {
+            sendJson(res, result.reason === "not-found" ? 404 : 409, { ok: false, error: result.reason });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: { approval: result.approval, task: result.task } });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/approval/pending` && req.method === "GET") {
+          const workspacePath = urlObj.searchParams.get("workspacePath") || process.cwd();
+          const pending = await TaskStore.listPendingApprovals(workspacePath);
+          sendJson(res, 200, { ok: true, data: pending });
+          return;
+        }
+
+        // ===== 自动派发（Fast Path 事件驱动） =====
+
+        if (pathname === `${API_BASE}/global` && req.method === "GET") {
+          // 跨工作区聚合（中台视图）：只读，扫全部工作区存储文档
+          const overview = await listGlobalOverview();
+          sendJson(res, 200, { ok: true, data: overview });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/dispatch/rules` && req.method === "GET") {
+          const workspacePath = urlObj.searchParams.get("workspacePath") || process.cwd();
+          const rules = await DispatchEngine.getRules(workspacePath);
+          sendJson(res, 200, { ok: true, data: rules });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/dispatch/rules` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{
+            workspacePath?: string;
+            mode?: DispatchMode;
+            priorities?: TaskPriority[];
+            tagsExclude?: string[];
+            whitelist?: string[];
+            maxConcurrent?: number;
+          }>(raw);
+          const workspacePath = body?.workspacePath || process.cwd();
+          const rules = await DispatchEngine.updateRules(workspacePath, body ?? {});
+          sendJson(res, 200, { ok: true, data: rules });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/dispatch/pending` && req.method === "GET") {
+          const workspacePath = urlObj.searchParams.get("workspacePath") || process.cwd();
+          const pending = await DispatchEngine.listPending(workspacePath);
+          sendJson(res, 200, { ok: true, data: pending });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/dispatch/log` && req.method === "GET") {
+          const workspacePath = urlObj.searchParams.get("workspacePath") || process.cwd();
+          const limit = Number(urlObj.searchParams.get("limit") ?? "50");
+          const log = await DispatchEngine.listLog(workspacePath, Number.isFinite(limit) ? limit : 50);
+          sendJson(res, 200, { ok: true, data: log });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/dispatch/ack` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{
+            workspacePath?: string;
+            id: string;
+            status: "sent" | "failed";
+          }>(raw);
+          if (!body || !body.id || (body.status !== "sent" && body.status !== "failed")) {
+            sendJson(res, 400, { ok: false, error: "Missing 'id' or invalid 'status' (sent|failed)" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const record = await DispatchEngine.ack(workspacePath, body.id, body.status);
+          if (!record) {
+            sendJson(res, 409, { ok: false, error: "Dispatch record not found or already settled" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: record });
+          return;
+        }
+
+        if (pathname === `${API_BASE}/dispatch/ignore` && req.method === "POST") {
+          const raw = await readBody(req);
+          const body = parseJsonBody<{ workspacePath?: string; id: string }>(raw);
+          if (!body || !body.id) {
+            sendJson(res, 400, { ok: false, error: "Missing 'id'" });
+            return;
+          }
+          const workspacePath = body.workspacePath || process.cwd();
+          const record = await DispatchEngine.ack(workspacePath, body.id, "ignored");
+          if (!record) {
+            sendJson(res, 409, { ok: false, error: "Dispatch record not found or already settled" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: record });
           return;
         }
 

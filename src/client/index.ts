@@ -1,10 +1,119 @@
 import type { ClientContext } from "@deepseek-ai/dsh-client-runtime/client";
-import { TaskGuideIcon } from "./icons.tsx";
-import { TaskPanelBody, TaskPanelTitle } from "./TaskPanel.tsx";
+import { TaskGuideIcon, GlobalBoardIcon } from "./icons.tsx";
+import { TaskPanelBody, TaskPanelTitle, resolveActiveWorkspace } from "./TaskPanel.tsx";
+import { GlobalBoardPanel } from "./GlobalBoard.tsx";
 import { openWorkspaceFileViaDsh, resolveWorkspacePath } from "./dsh-open.ts";
 
 export const TAB_ID = "dsh-workspace-tasks";
 export const TAB_KIND = "workspace-tasks";
+/** 任务中台（跨工作区全局看板）：左侧菜单入口 id 与 main 插槽 key */
+export const GLOBAL_PANEL_ID = "dsh-workspace-tasks-global";
+
+const API_BASE = "/__dsh-tasks__";
+/** 自动派发执行器轮询间隔：30s（queued 等待 GUI 取件；无件时空转零成本） */
+const DISPATCH_POLL_MS = 30_000;
+
+interface PendingDispatchEntry {
+  id: string;
+  taskId: string;
+  taskTitle?: string;
+  hop: number;
+}
+
+/**
+ * 自动派发执行器（宿主算、客户端发）：
+ * 后台轮询宿主引擎产生的 queued 条目，复用手动派发已验证的通道
+ * （composer.append → conversation.send 兜底）注入派发提示词唤醒 Agent，
+ * 随后置任务 in_progress（触发认领锁）并向宿主 ack 回执。
+ * 失败标 failed 不静默重试（重试与熔断归 TASK-011）。
+ */
+function startDispatchExecutor(ctx: ClientContext): () => void {
+  let ticking = false;
+
+  const ack = (workspacePath: string, id: string, status: "sent" | "failed") =>
+    fetch(`${API_BASE}/dispatch/ack`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspacePath, id, status }),
+    }).catch(() => {});
+
+  const tick = async (): Promise<void> => {
+    if (ticking) return;
+    ticking = true;
+    try {
+      const workspacePath = resolveActiveWorkspace(undefined, undefined).path;
+      if (!workspacePath) return;
+      const query = `?workspacePath=${encodeURIComponent(workspacePath)}`;
+
+      const pendingRes = await fetch(`${API_BASE}/dispatch/pending${query}`, { cache: "no-store" });
+      const pendingJson = (await pendingRes.json()) as { ok: boolean; data?: PendingDispatchEntry[] };
+      const entry = pendingJson?.data?.[0];
+      if (!entry) return;
+
+      // 取任务详情构造派发提示词
+      const listRes = await fetch(`${API_BASE}/list${query}`, { cache: "no-store" });
+      const listJson = (await listRes.json()) as {
+        ok: boolean;
+        data?: { tasks?: Array<{ id: string; title: string; description?: string }> };
+      };
+      const task = listJson?.data?.tasks?.find((t) => t.id === entry.taskId);
+      if (!task) {
+        await ack(workspacePath, entry.id, "failed");
+        return;
+      }
+
+      const prompt = `[自动派发] 请执行工作区就绪任务 [${task.id}]: "${task.title}"。\n${
+        task.description ? `任务详情：\n${task.description}\n\n` : ""
+      }请先用 workspace_task 的 update 把状态置为 in_progress（会自动获取认领锁），完成后用 conclude 登记执行结论与交付物。`;
+
+      const anyCtx = ctx as unknown as {
+        composer?: { append?: (text: string) => void };
+        conversation?: { send?: (msg: { text: string }) => Promise<void> | void };
+      };
+      let sent = false;
+      try {
+        if (anyCtx.composer?.append) {
+          anyCtx.composer.append(prompt);
+          sent = true;
+        } else if (anyCtx.conversation?.send) {
+          await anyCtx.conversation.send({ text: prompt });
+          sent = true;
+        }
+      } catch {
+        sent = false;
+      }
+      if (!sent) {
+        await ack(workspacePath, entry.id, "failed");
+        return;
+      }
+
+      // 唤醒成功：置 in_progress（宿主自动认领锁），再回执
+      await fetch(`${API_BASE}/update`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspacePath, taskId: entry.taskId, status: "in_progress" }),
+      }).catch(() => {});
+      await ack(workspacePath, entry.id, "sent");
+    } catch {
+      // 网络抖动等静默跳过，下一轮再试
+    } finally {
+      ticking = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    void tick();
+  }, DISPATCH_POLL_MS);
+  // 首个周期延迟执行：避免与 GUI 初始化争抢
+  const firstRun = setTimeout(() => {
+    void tick();
+  }, 10_000);
+
+  return () => {
+    clearInterval(timer);
+    clearTimeout(firstRun);
+  };
+}
 
 export const inject = [
   "slots",
@@ -88,5 +197,23 @@ export function apply(ctx: ClientContext): void {
       },
       TaskPanelTitle
     )
+  );
+
+  // 4. 自动派发执行器：GUI 启动即活，不依赖看板打开
+  ctx.effect(
+    () => startDispatchExecutor(ctx),
+    "dsh-workspace-tasks: auto-dispatch executor"
+  );
+
+  // 5. 任务中台：左侧菜单「插件」区入口（sidebar.panellist）+ 主区域全宽面板（main 插槽）
+  //    模式照搬 dsh-guizang-design；直接 React 渲染（不套 iframe），主题 token 天然生效
+  ctx.slots.inject("sidebar.panellist", () =>
+    ctx.slots.register(
+      { name: "sidebar.panellist", id: GLOBAL_PANEL_ID, order: 7, label: () => "任务中台" },
+      GlobalBoardIcon
+    )
+  );
+  ctx.slots.inject("main", () =>
+    ctx.slots.register({ name: "main", key: GLOBAL_PANEL_ID }, GlobalBoardPanel)
   );
 }

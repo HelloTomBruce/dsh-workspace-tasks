@@ -1,6 +1,6 @@
 import { createElement, useState } from "react";
 import type { CSSProperties } from "react";
-import type { DecisionRecord, TaskCheckpoint, TraceRef } from "../store/types.ts";
+import type { ApprovalRequest, DecisionRecord, TaskCheckpoint, TraceRef } from "../store/types.ts";
 import { MarkdownContent } from "./markdown.tsx";
 
 /**
@@ -114,6 +114,30 @@ const sectionLabelStyle: CSSProperties = {
   color: "var(--dsw-alias-label-secondary, #64748b)",
 };
 
+// 已决审批条目：批准=绿色左边线，驳回=灰色左边线降级
+const approvalItemStyle = (approved: boolean): CSSProperties => ({
+  border: "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.06))",
+  borderLeft: approved ? "3px solid #059669" : "3px solid rgba(148, 163, 184, 0.5)",
+  borderRadius: 6,
+  padding: "6px 8px",
+  marginTop: 4,
+  opacity: approved ? 1 : 0.72,
+  backgroundColor: approved
+    ? "rgba(5, 150, 105, 0.05)"
+    : "var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02))",
+});
+
+const approvalDecisionChipStyle: CSSProperties = {
+  fontSize: 10,
+  fontFamily: "monospace",
+  padding: "1px 6px",
+  borderRadius: 8,
+  backgroundColor: "rgba(124, 58, 237, 0.12)",
+  color: "#7c3aed",
+  whiteSpace: "nowrap",
+  cursor: "default",
+};
+
 const itemTextStyle: CSSProperties = {
   fontSize: 12,
   lineHeight: 1.5,
@@ -159,14 +183,18 @@ export function TraceSections({
   checkpoints = [],
   traceRefs = [],
   resolvedTraces,
+  approvals = [],
 }: {
   decisions?: DecisionRecord[];
   checkpoints?: TaskCheckpoint[];
   traceRefs?: TraceRef[];
   /** resolveTraceRefs 的解析结果；未解析时降级展示裸引用 */
   resolvedTraces?: TraceRef[] | null;
+  /** 审批记录（票拟）：仅展示已批红/已驳回的，pending 由卡片批红区承载 */
+  approvals?: ApprovalRequest[];
 }) {
   const [showHistory, setShowHistory] = useState(false);
+  const resolvedApprovals = approvals.filter((a) => a.status !== "pending");
 
   return [
     // ===== 决策演进链（append-only，supersede 标识） =====
@@ -209,6 +237,61 @@ export function TraceSections({
                 d.actor && createElement("span", { style: itemTimeStyle }, `👤 ${d.actor}`),
                 d.sessionId && createElement("span", { style: itemTimeStyle, title: "装饰性溯源线索，可悬挂" }, `🧵 ${d.sessionId}`)
               )
+            )
+          )
+        )
+      ),
+
+    // ===== 已决审批（票拟→批红：批准自动落决策并回链） =====
+    resolvedApprovals.length > 0 &&
+      createElement(
+        "div",
+        { style: { ...sectionBlockStyle, marginTop: 10 } },
+        createElement("span", { style: sectionLabelStyle }, "🖋️ 已决审批 (票拟→批红):"),
+        createElement(
+          "div",
+          { style: { marginTop: 4 } },
+          resolvedApprovals.map((a) =>
+            createElement(
+              "div",
+              { key: a.id, style: approvalItemStyle(a.status === "approved") },
+              createElement(
+                "div",
+                { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+                createElement(
+                  "span",
+                  { style: { fontWeight: 600, fontSize: 12 } },
+                  `${a.status === "approved" ? "✓ 已批红" : "✕ 已驳回"}：${a.title}`
+                ),
+                a.decisionId &&
+                  createElement(
+                    "span",
+                    {
+                      style: approvalDecisionChipStyle,
+                      title: `批红自动落盘的决策记录（回链）\n${a.decisionId}`,
+                    },
+                    `⚖️ ${a.decisionId.slice(0, 14)}…`
+                  )
+              ),
+              a.status === "approved" &&
+                a.resolvedOptionId &&
+                createElement(
+                  "div",
+                  { style: { ...itemTextStyle, marginTop: 2 } },
+                  `批红选项：「${a.options.find((o) => o.id === a.resolvedOptionId)?.label ?? a.resolvedOptionId}」`
+                ),
+              a.resolveNote &&
+                createElement(
+                  "div",
+                  { style: { ...itemTextStyle, marginTop: 2, opacity: 0.85 } },
+                  `${a.status === "approved" ? "批注" : "驳回备注"}：${a.resolveNote}`
+                ),
+              a.resolvedAt &&
+                createElement(
+                  "span",
+                  { style: itemTimeStyle },
+                  `⏱ ${new Date(a.resolvedAt).toLocaleString()}`
+                )
             )
           )
         )

@@ -2,11 +2,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { getReadyTasks, generateWorkspaceSummaryReport } from "./pipeline.js";
+import { getReadyTasks, generateWorkspaceSummaryReport, isClaimActive, normalizeLeaseMinutes } from "./pipeline.js";
 import type {
+  ApprovalOption,
+  ApprovalRequest,
   DecisionRecord,
   ProjectTask,
   TaskCheckpoint,
+  TaskClaim,
   TraceRef,
   TaskConclusion,
   TaskPriority,
@@ -14,6 +17,58 @@ import type {
   WorkspaceTasksDocument,
   WorkspaceTasksSummary,
 } from "./types.ts";
+
+/**
+ * 认领冲突：任务被他人活跃锁定。这是多 Agent 并行的正常分支而非系统错误——
+ * 工具层捕获后返回结构化响应（不抛异常），Agent 读到 owner 后应主动让开。
+ */
+export class ClaimConflictError extends Error {
+  taskId: string;
+  claim: TaskClaim;
+  constructor(taskId: string, claim: TaskClaim) {
+    super(`Task ${taskId} is actively claimed by ${claim.owner} (lease until ${claim.leaseUntil})`);
+    this.name = "ClaimConflictError";
+    this.taskId = taskId;
+    this.claim = claim;
+  }
+}
+
+export type ClaimResult =
+  | { ok: true; task: ProjectTask }
+  | { ok: false; reason: "not-found" | "conflict"; claim?: TaskClaim };
+
+/**
+ * 任务完成事件钩子：addConclusion 与 updateTask(status→done) 后触发。
+ * 供自动派发引擎等订阅方使用；监听器同步调用、异常隔离（不影响主流程），
+ * 异步工作由监听方自行 fire-and-forget。
+ */
+export type TaskDoneListener = (workspacePath: string, task: ProjectTask) => void;
+
+const taskDoneListeners = new Set<TaskDoneListener>();
+
+export function onTaskDone(listener: TaskDoneListener): () => void {
+  taskDoneListeners.add(listener);
+  return () => {
+    taskDoneListeners.delete(listener);
+  };
+}
+
+function emitTaskDone(workspacePath: string, task: ProjectTask): void {
+  for (const listener of taskDoneListeners) {
+    try {
+      listener(workspacePath, task);
+    } catch (err) {
+      console.error("[dsh-workspace-tasks] onTaskDone listener error:", err);
+    }
+  }
+}
+
+export type ApprovalResult =
+  | { ok: true; approval: ApprovalRequest; task: ProjectTask; decision?: DecisionRecord }
+  | {
+      ok: false;
+      reason: "not-found" | "pending-exists" | "invalid" | "not-pending" | "invalid-option";
+    };
 
 /**
  * 获取本地持久化根目录：统一存放在用户本地 ~/.dsh/storages/workspace-tasks/，
@@ -38,7 +93,7 @@ export function getTasksFilePath(workspacePath: string): string {
   return path.join(getStorageDir(), safeName);
 }
 
-function computeSummary(tasks: readonly ProjectTask[]): WorkspaceTasksSummary {
+export function computeSummary(tasks: readonly ProjectTask[]): WorkspaceTasksSummary {
   let todo = 0;
   let inProgress = 0;
   let review = 0;
@@ -214,15 +269,24 @@ export class TaskStore {
   static async updateTask(
     workspacePath: string,
     taskId: string,
-    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "tags" | "assignee" | "dependsOn">>
+    patch: Partial<Pick<ProjectTask, "title" | "description" | "status" | "priority" | "tags" | "assignee" | "dependsOn">>,
+    opts?: { claimOwner?: string; sessionHint?: string; leaseMinutes?: number }
   ): Promise<ProjectTask | null> {
     const doc = await this.load(workspacePath);
     const task = doc.tasks.find((t) => t.id === taskId);
     if (!task) return null;
 
+    // 认领冲突检查必须先于任何字段修改：转入 in_progress 且持他人活跃锁时直接拒绝
+    const wantsClaim = patch.status === "in_progress" && Boolean(opts?.claimOwner?.trim());
+    if (wantsClaim && isClaimActive(task.claim) && task.claim!.owner !== opts!.claimOwner!.trim()) {
+      throw new ClaimConflictError(taskId, task.claim!);
+    }
+
     // 记录变更前的快照，落盘前生成检查点事件
+    const prevStatus = task.status;
     const before = new Map<string, unknown>();
     for (const f of CHECKPOINT_FIELDS) before.set(f, task[f]);
+    const beforeClaim = snapshot(task.claim ?? null);
 
     if (patch.title !== undefined) task.title = patch.title.trim();
     if (patch.description !== undefined) task.description = patch.description.trim();
@@ -250,17 +314,107 @@ export class TaskStore {
       }
     }
 
+    // 认领锁联动：转入 in_progress 加锁/续租；转入终态或 todo/review 释放；
+    // blocked 保留锁（待批/待恢复期间防止被其他会话捡走，与审批闭环协同）
+    if (wantsClaim) {
+      const owner = opts!.claimOwner!.trim();
+      const leaseMinutes = normalizeLeaseMinutes(opts!.leaseMinutes);
+      const now = new Date();
+      const sameOwner = task.claim?.owner === owner;
+      task.claim = {
+        owner,
+        ...(opts!.sessionHint?.trim()
+          ? { sessionHint: opts!.sessionHint.trim() }
+          : sameOwner && task.claim?.sessionHint
+            ? { sessionHint: task.claim.sessionHint }
+            : {}),
+        claimedAt: sameOwner && task.claim ? task.claim.claimedAt : now.toISOString(),
+        leaseUntil: new Date(now.getTime() + leaseMinutes * 60_000).toISOString(),
+      };
+    } else if (patch.status && patch.status !== "in_progress" && patch.status !== "blocked" && task.claim) {
+      delete task.claim;
+    }
+
     task.updatedAt = new Date().toISOString();
-    pushCheckpoints(
-      task,
-      CHECKPOINT_FIELDS.filter((f) => snapshot(before.get(f)) !== snapshot(task[f])).map((f) => ({
+    pushCheckpoints(task, [
+      ...CHECKPOINT_FIELDS.filter((f) => snapshot(before.get(f)) !== snapshot(task[f])).map((f) => ({
         field: f,
         from: snapshot(before.get(f)),
         to: snapshot(task[f]),
-      }))
-    );
+      })),
+      ...(snapshot(task.claim ?? null) !== beforeClaim
+        ? [{ field: "claim", from: beforeClaim, to: snapshot(task.claim ?? null) }]
+        : []),
+    ]);
     await this.save(workspacePath, doc);
+    // 状态首次进入 done 时发出完成事件（自动派发引擎等订阅方消费）
+    if (prevStatus !== "done" && task.status === "done") {
+      emitTaskDone(workspacePath, task);
+    }
     return task;
+  }
+
+  /**
+   * 显式认领任务（加锁/续租）。被他人活跃锁定时返回 conflict（结构化，不抛异常）。
+   * 同一 owner 重复认领即续租：保留 claimedAt，仅延长 leaseUntil。
+   */
+  static async claimTask(
+    workspacePath: string,
+    taskId: string,
+    opts: { owner: string; sessionHint?: string; leaseMinutes?: number }
+  ): Promise<ClaimResult> {
+    const owner = opts.owner?.trim();
+    if (!owner) throw new Error("claimTask requires a non-empty owner");
+    const doc = await this.load(workspacePath);
+    const task = doc.tasks.find((t) => t.id === taskId);
+    if (!task) return { ok: false, reason: "not-found" };
+    if (isClaimActive(task.claim) && task.claim!.owner !== owner) {
+      return { ok: false, reason: "conflict", claim: task.claim };
+    }
+    const leaseMinutes = normalizeLeaseMinutes(opts.leaseMinutes);
+    const now = new Date();
+    const sameOwner = task.claim?.owner === owner;
+    const beforeClaim = snapshot(task.claim ?? null);
+    task.claim = {
+      owner,
+      ...(opts.sessionHint?.trim()
+        ? { sessionHint: opts.sessionHint.trim() }
+        : sameOwner && task.claim?.sessionHint
+          ? { sessionHint: task.claim.sessionHint }
+          : {}),
+      claimedAt: sameOwner && task.claim ? task.claim.claimedAt : now.toISOString(),
+      leaseUntil: new Date(now.getTime() + leaseMinutes * 60_000).toISOString(),
+    };
+    task.updatedAt = now.toISOString();
+    pushCheckpoints(task, [{ field: "claim", from: beforeClaim, to: snapshot(task.claim) }]);
+    await this.save(workspacePath, doc);
+    return { ok: true, task };
+  }
+
+  /**
+   * 释放认领锁。幂等：无锁直接成功；锁已过期视为可释放并顺手清理；
+   * 活跃锁仅允许 owner 本人或 force（UI 人力强制释放死锁）解除。
+   */
+  static async releaseTask(
+    workspacePath: string,
+    taskId: string,
+    opts?: { owner?: string; force?: boolean }
+  ): Promise<ClaimResult> {
+    const doc = await this.load(workspacePath);
+    const task = doc.tasks.find((t) => t.id === taskId);
+    if (!task) return { ok: false, reason: "not-found" };
+    if (!task.claim) return { ok: true, task };
+    const active = isClaimActive(task.claim);
+    const owner = opts?.owner?.trim();
+    if (active && !opts?.force && (!owner || task.claim.owner !== owner)) {
+      return { ok: false, reason: "conflict", claim: task.claim };
+    }
+    const beforeClaim = snapshot(task.claim);
+    delete task.claim;
+    task.updatedAt = new Date().toISOString();
+    pushCheckpoints(task, [{ field: "claim", from: beforeClaim, to: "null" }]);
+    await this.save(workspacePath, doc);
+    return { ok: true, task };
   }
 
   /**
@@ -364,13 +518,19 @@ export class TaskStore {
     task.conclusions.unshift(newConclusion);
     const prevStatus = task.status;
     task.status = "done";
+    // 结单即释放认领锁（无论 owner 是谁）：工作已结束，锁不应残留
+    const beforeClaim = snapshot(task.claim ?? null);
+    if (task.claim) delete task.claim;
     task.updatedAt = new Date().toISOString();
     pushCheckpoints(task, [
       { field: "conclusion", from: "null", to: snapshot({ id: newConclusion.id, summary: newConclusion.summary }) },
       ...(prevStatus !== "done" ? [{ field: "status", from: snapshot(prevStatus), to: snapshot("done") }] : []),
+      ...(beforeClaim !== "null" ? [{ field: "claim", from: beforeClaim, to: "null" }] : []),
     ]);
 
     await this.save(workspacePath, doc);
+    // 结单即完成事件（自动派发引擎在此触发就绪重算）
+    emitTaskDone(workspacePath, task);
     return task;
   }
 
@@ -471,6 +631,176 @@ export class TaskStore {
     return task?.decisionLog ?? [];
   }
 
+  /**
+   * 发起决策请求（票拟）：任务随即转入 blocked 挂起（零消耗），resumeStatus 记录原状态。
+   * 同一任务同时只允许一条 pending（去重：一件事只问一次）；
+   * done/archived 终态任务不允许发起。options 至少 2 个候选。
+   * 锁语义：blocked 保留 claim，待批期间其他会话不会把任务捡走。
+   */
+  static async requestApproval(
+    workspacePath: string,
+    taskId: string,
+    req: { title: string; detail?: string; options: string[] }
+  ): Promise<ApprovalResult> {
+    const title = req.title?.trim();
+    const labels = Array.isArray(req.options) ? req.options.map((o) => o.trim()).filter(Boolean) : [];
+    if (!title || labels.length < 2) return { ok: false, reason: "invalid" };
+
+    const doc = await this.load(workspacePath);
+    const task = doc.tasks.find((t) => t.id === taskId);
+    if (!task) return { ok: false, reason: "not-found" };
+    if (task.status === "done" || task.status === "archived") return { ok: false, reason: "invalid" };
+    if ((task.approvals ?? []).some((a) => a.status === "pending")) {
+      return { ok: false, reason: "pending-exists" };
+    }
+
+    const now = new Date().toISOString();
+    const options: ApprovalOption[] = labels.map((label, i) => ({ id: `opt-${i + 1}`, label }));
+    const approval: ApprovalRequest = {
+      id: `APR-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      title,
+      ...(req.detail?.trim() ? { detail: req.detail.trim() } : {}),
+      options,
+      status: "pending",
+      // 已 blocked 的任务再次发起时，恢复原状的目标视为 in_progress（继续干活）
+      resumeStatus: task.status === "blocked" ? "in_progress" : task.status,
+      createdAt: now,
+    };
+
+    if (!task.approvals) task.approvals = [];
+    task.approvals.unshift(approval);
+    const prevStatus = task.status;
+    task.status = "blocked";
+    task.updatedAt = now;
+    pushCheckpoints(task, [
+      { field: "approval.request", from: "null", to: snapshot({ id: approval.id, title: approval.title }) },
+      ...(prevStatus !== "blocked"
+        ? [{ field: "status", from: snapshot(prevStatus), to: snapshot("blocked") }]
+        : []),
+    ]);
+    await this.save(workspacePath, doc);
+    return { ok: true, approval, task };
+  }
+
+  /**
+   * 批红（批准）：标记审批通过，自动落一条 DecisionRecord
+   * （标题「拍板：…」，rationale 含选中选项原话与背景，actor 默认 human，
+   * alternatives 收录未被选中的选项），decisionId 回链到审批记录，
+   * 任务状态恢复 resumeStatus。仅接受 pending 状态的请求。
+   */
+  static async resolveApproval(
+    workspacePath: string,
+    taskId: string,
+    approvalId: string,
+    resolution: { optionId: string; note?: string; actor?: string }
+  ): Promise<ApprovalResult> {
+    const doc = await this.load(workspacePath);
+    const task = doc.tasks.find((t) => t.id === taskId);
+    if (!task) return { ok: false, reason: "not-found" };
+    const approval = (task.approvals ?? []).find((a) => a.id === approvalId);
+    if (!approval) return { ok: false, reason: "not-found" };
+    if (approval.status !== "pending") return { ok: false, reason: "not-pending" };
+    const option = approval.options.find((o) => o.id === resolution.optionId);
+    if (!option) return { ok: false, reason: "invalid-option" };
+
+    const now = new Date().toISOString();
+    approval.status = "approved";
+    approval.resolvedOptionId = option.id;
+    if (resolution.note?.trim()) approval.resolveNote = resolution.note.trim();
+    approval.resolvedAt = now;
+
+    // 批准即决策：自包含落盘（选项原话 + 背景 + 批注），未被选中的选项进入 alternatives
+    const record: DecisionRecord = {
+      id: `DEC-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      title: `拍板：${approval.title}`,
+      rationale: [
+        `批准选项「${option.label}」。`,
+        approval.detail ? `背景：${approval.detail}` : null,
+        resolution.note?.trim() ? `批注：${resolution.note.trim()}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      alternatives: approval.options.filter((o) => o.id !== option.id).map((o) => o.label),
+      actor: resolution.actor?.trim() || "human",
+      decidedAt: now,
+    };
+    if (!task.decisionLog) task.decisionLog = [];
+    task.decisionLog.unshift(record);
+    approval.decisionId = record.id;
+
+    // 恢复挂起前状态（通常 in_progress），Agent 被唤醒后凭决策记录无缝续跑。
+    // 仅当任务仍停留在 blocked 时才恢复：待批期间若人已通过其他路径改变状态
+    // （conclude 完成 / archive 归档 / 手动改状态），尊重最新状态，批红只落决策不复活任务
+    const prevStatus = task.status;
+    const shouldResume = prevStatus === "blocked";
+    if (shouldResume) {
+      task.status = approval.resumeStatus;
+    }
+    task.updatedAt = now;
+    pushCheckpoints(task, [
+      {
+        field: "approval.resolve",
+        from: snapshot({ id: approval.id, status: "pending" }),
+        to: snapshot({ id: approval.id, status: "approved", option: option.label, decisionId: record.id }),
+      },
+      { field: "decision", from: "null", to: snapshot({ id: record.id, title: record.title }) },
+      ...(shouldResume && prevStatus !== approval.resumeStatus
+        ? [{ field: "status", from: snapshot(prevStatus), to: snapshot(approval.resumeStatus) }]
+        : []),
+    ]);
+    await this.save(workspacePath, doc);
+    return { ok: true, approval, task, decision: record };
+  }
+
+  /**
+   * 驳回：不落决策，任务保持 blocked，等待 Agent 重新规划后发起新的请求。
+   */
+  static async rejectApproval(
+    workspacePath: string,
+    taskId: string,
+    approvalId: string,
+    opts?: { note?: string }
+  ): Promise<ApprovalResult> {
+    const doc = await this.load(workspacePath);
+    const task = doc.tasks.find((t) => t.id === taskId);
+    if (!task) return { ok: false, reason: "not-found" };
+    const approval = (task.approvals ?? []).find((a) => a.id === approvalId);
+    if (!approval) return { ok: false, reason: "not-found" };
+    if (approval.status !== "pending") return { ok: false, reason: "not-pending" };
+
+    const now = new Date().toISOString();
+    approval.status = "rejected";
+    if (opts?.note?.trim()) approval.resolveNote = opts.note.trim();
+    approval.resolvedAt = now;
+    task.updatedAt = now;
+    pushCheckpoints(task, [
+      {
+        field: "approval.resolve",
+        from: snapshot({ id: approval.id, status: "pending" }),
+        to: snapshot({ id: approval.id, status: "rejected", note: approval.resolveNote ?? null }),
+      },
+    ]);
+    await this.save(workspacePath, doc);
+    return { ok: true, approval, task };
+  }
+
+  /**
+   * 跨任务收集所有 pending 审批（供看板「待拍板」横幅）。
+   */
+  static async listPendingApprovals(
+    workspacePath: string
+  ): Promise<Array<{ taskId: string; taskTitle: string; approval: ApprovalRequest }>> {
+    const doc = await this.load(workspacePath);
+    const out: Array<{ taskId: string; taskTitle: string; approval: ApprovalRequest }> = [];
+    for (const t of doc.tasks) {
+      if (t.status === "archived") continue;
+      for (const a of t.approvals ?? []) {
+        if (a.status === "pending") out.push({ taskId: t.id, taskTitle: t.title, approval: a });
+      }
+    }
+    return out;
+  }
+
   static async archiveTask(workspacePath: string, taskId: string): Promise<ProjectTask | null> {
     return this.updateTask(workspacePath, taskId, { status: "archived" });
   }
@@ -485,9 +815,9 @@ export class TaskStore {
     return true;
   }
 
-  static async getReadyTasks(workspacePath: string): Promise<ProjectTask[]> {
+  static async getReadyTasks(workspacePath: string, opts?: { owner?: string }): Promise<ProjectTask[]> {
     const doc = await this.load(workspacePath);
-    return getReadyTasks(doc.tasks);
+    return getReadyTasks(doc.tasks, opts);
   }
 
   static async exportSummaryReport(workspacePath: string): Promise<string> {
