@@ -9,7 +9,7 @@ export interface TaskCreateItem {
     dependsOn?: string[];
 }
 export interface WorkspaceTaskToolArgs {
-    action: "list" | "create" | "update" | "conclude" | "archive" | "delete" | "get_ready_tasks" | "export_report" | "record_decision" | "get_task_history" | "link_trace";
+    action: "list" | "create" | "update" | "conclude" | "archive" | "delete" | "get_ready_tasks" | "export_report" | "record_decision" | "get_task_history" | "link_trace" | "claim" | "release" | "request_approval";
     taskId?: string;
     title?: string;
     description?: string;
@@ -41,6 +41,14 @@ export interface WorkspaceTaskToolArgs {
     refTaskId?: string;
     /** link_trace 时使用：引用说明 */
     refNote?: string;
+    /** claim / update(in_progress) 时使用：租约分钟数（默认 60，可调 1–240） */
+    leaseMinutes?: number;
+    /** request_approval 时使用：拍板事项标题（票拟标题） */
+    approvalTitle?: string;
+    /** request_approval 时使用：背景说明（可选） */
+    approvalDetail?: string;
+    /** request_approval 时使用：批红候选选项文本（≥2 个） */
+    options?: string[];
 }
 export declare function registerTaskTools(ctx: Context): () => void;
 //# sourceMappingURL=task-tools.d.ts.map

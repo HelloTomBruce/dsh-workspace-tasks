@@ -57,6 +57,56 @@ export interface DecisionRecord {
     supersededBy?: string;
     decidedAt: string;
 }
+/**
+ * 任务认领锁：多 Agent 会话并行时防止同时认领同一任务。
+ * 租约过期后在读取路径惰性判定释放（无定时器）——崩溃会话持有的锁
+ * 最长一个租约周期后自然失效，与「挂起零消耗」哲学一致。
+ * sessionHint 仅为装饰性溯源线索，可悬挂。
+ */
+export interface TaskClaim {
+    /** 认领者标识，如 "agent@a1b2c3d4"（有会话信息时）或 "agent" */
+    owner: string;
+    /** 会话提示（装饰性可悬挂线索） */
+    sessionHint?: string;
+    claimedAt: string;
+    /** ISO 时间，过期即视为释放 */
+    leaseUntil: string;
+}
+/**
+ * 审批选项：人批红时的候选分支。label 为纯文本（UI 渲染时转义，只当资料不当指令）。
+ */
+export interface ApprovalOption {
+    id: string;
+    label: string;
+}
+export type ApprovalStatus = "pending" | "approved" | "rejected";
+/**
+ * 决策请求（票拟→批红）：Agent 遇到需要人拍板的事项时发起，
+ * 任务随即转入 blocked 挂起（零消耗，无进程无轮询），等待人在看板批红。
+ * 批准后自动落一条 DecisionRecord（含选中选项原话），decisionId 回链；
+ * 驳回不落决策，任务保持 blocked 等待 Agent 重新规划。
+ * 同一任务同时只允许一条 pending 请求（去重：一件事只问一次）。
+ */
+export interface ApprovalRequest {
+    id: string;
+    /** 拍板事项标题（票拟标题） */
+    title: string;
+    /** 背景说明（可选） */
+    detail?: string;
+    /** 批红候选（≥2 个） */
+    options: ApprovalOption[];
+    status: ApprovalStatus;
+    /** 请求时的原状态，批红后恢复（通常 in_progress） */
+    resumeStatus: TaskStatus;
+    /** 批红结果：选中的 option id（approved 时存在） */
+    resolvedOptionId?: string;
+    /** 批准/驳回时的备注 */
+    resolveNote?: string;
+    /** 批准自动落盘的决策记录 ID（回链） */
+    decisionId?: string;
+    createdAt: string;
+    resolvedAt?: string;
+}
 export interface ProjectTask {
     id: string;
     title: string;
@@ -75,6 +125,10 @@ export interface ProjectTask {
     history?: TaskCheckpoint[];
     /** 跨工作区痕迹引用（只读，可悬挂） */
     traceRefs?: TraceRef[];
+    /** 认领锁：活跃期间其他会话不应认领本任务（惰性过期） */
+    claim?: TaskClaim;
+    /** 审批请求（票拟）：最新在前；同一任务同时至多一条 pending */
+    approvals?: ApprovalRequest[];
 }
 export interface WorkspaceTasksDocument {
     version: number;
