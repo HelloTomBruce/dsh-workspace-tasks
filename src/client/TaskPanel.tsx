@@ -467,6 +467,7 @@ export function TaskPanelBody(props?: {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
 
   const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
@@ -729,6 +730,7 @@ export function TaskPanelBody(props?: {
       style: containerStyle,
       onPointerDown: () => {
         if (showWorkspaceMenu) setShowWorkspaceMenu(false);
+        if (showMoreMenu) setShowMoreMenu(false);
       },
     },
     // 头部工具栏
@@ -812,53 +814,85 @@ export function TaskPanelBody(props?: {
       createElement(
         "div",
         { style: headerActionsStyle },
-        dispatchRules &&
+        // ⋯ 更多菜单：收敛自动派发三态 / 派发记录 / 导出报告（头部只留高频动作）
+        createElement(
+          "div",
+          { style: { position: "relative", display: "inline-block" } },
           createElement(
-            "div",
+            "button",
             {
-              style: dispatchModeGroupStyle,
-              title: `自动派发规则：优先级 ${(dispatchRules.priorities ?? []).join("/") || "全部"} · 并发上限 ${dispatchRules.maxConcurrent}${
-                dispatchRules.tagsExclude?.length ? ` · 排除标签 ${dispatchRules.tagsExclude.join(", ")}` : ""
-              }${dispatchRules.whitelist?.length ? ` · 白名单 ${dispatchRules.whitelist.join(", ")}` : ""}`,
+              type: "button",
+              onClick: (e: any) => {
+                e.stopPropagation();
+                setShowMoreMenu(!showMoreMenu);
+              },
+              style: iconBtnStyle,
+              title: "更多（自动派发 / 派发记录 / 导出报告）",
             },
-            (["observe", "auto", "off"] as const).map((m) =>
+            "⋯"
+          ),
+          showMoreMenu &&
+            createElement(
+              "div",
+              {
+                style: moreMenuStyle,
+                onClick: (e: any) => e.stopPropagation(),
+              },
+              dispatchRules &&
+                createElement(
+                  "div",
+                  { style: menuHeaderStyle },
+                  `自动派发 · 优先级 ${(dispatchRules.priorities ?? []).join("/") || "全部"} · 并发 ${dispatchRules.maxConcurrent}${
+                    dispatchRules.tagsExclude?.length ? ` · 排除 ${dispatchRules.tagsExclude.join(",")}` : ""
+                  }`
+                ),
+              dispatchRules &&
+                (["observe", "auto", "off"] as const).map((m) =>
+                  createElement(
+                    "button",
+                    {
+                      key: m,
+                      type: "button",
+                      style: menuItemStyle(dispatchRules.mode === m),
+                      title:
+                        m === "observe"
+                          ? "观察模式：任务完成后只记录「本会派发什么」，不自动发送（验证规则靠谱后再切自动）"
+                          : m === "auto"
+                          ? "自动模式：任务完成后自动派发下一个就绪任务（并发上限内）"
+                          : "关闭自动派发",
+                      onClick: () => setDispatchMode(m),
+                    },
+                    m === "observe" ? "👁️ 观察模式" : m === "auto" ? "⚡ 自动派发" : "⏸️ 关闭派发",
+                    dispatchRules.mode === m ? " ✓" : ""
+                  )
+                ),
+              dispatchRules && createElement("div", { style: menuDividerStyle }),
               createElement(
                 "button",
                 {
-                  key: m,
                   type: "button",
-                  style: dispatchModeBtnStyle(dispatchRules.mode === m),
-                  title:
-                    m === "observe"
-                      ? "观察模式：任务完成后只记录「本会派发什么」，不自动发送（验证规则靠谱后再切自动）"
-                      : m === "auto"
-                      ? "自动模式：任务完成后自动派发下一个就绪任务（并发上限内）"
-                      : "关闭自动派发",
-                  onClick: () => setDispatchMode(m),
+                  style: menuItemStyle(showDispatchLog),
+                  onClick: () => {
+                    setShowDispatchLog(!showDispatchLog);
+                    setShowMoreMenu(false);
+                  },
                 },
-                m === "observe" ? "👁️ 观察" : m === "auto" ? "⚡ 自动" : "⏸️ 关闭"
+                "📜 派发记录",
+                showDispatchLog ? " ✓" : ""
+              ),
+              createElement(
+                "button",
+                {
+                  type: "button",
+                  style: menuItemStyle(false),
+                  onClick: () => {
+                    setShowReportModal(true);
+                    setShowMoreMenu(false);
+                  },
+                },
+                "📋 导出报告"
               )
             )
-          ),
-        createElement(
-          "button",
-          {
-            type: "button",
-            onClick: () => setShowDispatchLog(!showDispatchLog),
-            style: iconBtnStyle,
-            title: showDispatchLog ? "收起自动派发记录" : "查看自动派发记录",
-          },
-          "📜"
-        ),
-        createElement(
-          "button",
-          {
-            type: "button",
-            onClick: () => setShowReportModal(true),
-            style: reportBtnStyle,
-            title: "一键导出工作区全景交付与工程总结报告",
-          },
-          "📋 导出报告"
         ),
         createElement(
           "button",
@@ -3109,20 +3143,6 @@ const tagChipStyle: CSSProperties = {
   cursor: "pointer",
 };
 
-const reportBtnStyle: CSSProperties = {
-  background: "transparent",
-  border: "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
-  color: "var(--dsw-alias-label-secondary, #475569)",
-  borderRadius: "6px",
-  padding: "5px 9px",
-  fontSize: "11.5px",
-  fontWeight: "500",
-  cursor: "pointer",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: "4px",
-};
-
 const searchContainerStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -3330,25 +3350,28 @@ const staleBannerStyle: CSSProperties = {
   border: "1px solid rgba(245, 158, 11, 0.3)",
 };
 
-const dispatchModeGroupStyle: CSSProperties = {
+// 「更多」下拉菜单（右对齐，复用工作区菜单的视觉语言）
+const moreMenuStyle: CSSProperties = {
+  position: "absolute",
+  top: "calc(100% + 4px)",
+  right: 0,
+  backgroundColor: "var(--dsw-alias-bg-layer-2, #ffffff)",
+  border: "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
+  borderRadius: "8px",
+  boxShadow: "var(--dsw-shadow-lv3, 0 8px 20px rgba(0, 0, 0, 0.15))",
+  padding: "4px",
+  zIndex: 100,
+  minWidth: "200px",
   display: "flex",
-  alignItems: "center",
-  borderRadius: 7,
-  border: "1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1))",
-  overflow: "hidden",
-  flexShrink: 0,
+  flexDirection: "column",
+  gap: "2px",
 };
 
-const dispatchModeBtnStyle = (active: boolean): CSSProperties => ({
-  fontSize: 11,
-  padding: "4px 8px",
-  border: "none",
-  backgroundColor: active ? "rgba(124, 58, 237, 0.14)" : "transparent",
-  color: active ? "#7c3aed" : "var(--dsw-alias-label-secondary, #64748b)",
-  cursor: "pointer",
-  fontWeight: active ? 600 : 400,
-  whiteSpace: "nowrap",
-});
+const menuDividerStyle: CSSProperties = {
+  height: 1,
+  backgroundColor: "var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08))",
+  margin: "3px 4px",
+};
 
 const observeBannerStyle: CSSProperties = {
   margin: "0 16px 8px 16px",
