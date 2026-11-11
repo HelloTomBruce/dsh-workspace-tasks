@@ -50,6 +50,9 @@ describe("跨工作区全局聚合（中台视图）", () => {
     expect(a.pendingApprovals.length).toBe(1);
     expect(a.pendingApprovals[0]?.approval.title).toBe("删旧表？");
     expect(a.pendingApprovals[0]?.taskTitle).toBe("A approval task");
+    // 附带完整任务对象：中台弹窗批红需要（描述/选项/状态）
+    expect(a.pendingApprovals[0]?.task.id).toBe(approving.id);
+    expect(a.pendingApprovals[0]?.task.status).toBe("blocked");
     expect(a.done.length).toBe(1);
     expect(a.readyPreview.count).toBe(1);
     expect(a.readyPreview.tasks[0]?.title).toBe("A ready");

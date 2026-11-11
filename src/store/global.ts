@@ -24,8 +24,8 @@ export interface WorkspaceOverview {
   fileName?: string;
   updatedAt: string;
   summary: WorkspaceTasksSummary;
-  /** 待拍板：pending 审批（带票拟标题，人不用进工作区就知道要批什么） */
-  pendingApprovals: Array<{ taskId: string; taskTitle: string; approval: ApprovalRequest }>;
+  /** 待拍板：pending 审批（带票拟标题与完整任务对象，中台弹窗可直接批红） */
+  pendingApprovals: Array<{ taskId: string; taskTitle: string; approval: ApprovalRequest; task: ProjectTask }>;
   /** 进行中（带认领锁信息） */
   inProgress: ProjectTask[];
   /** 待验收（review 状态） */
@@ -143,6 +143,7 @@ export async function listGlobalOverview(): Promise<GlobalOverview> {
             taskId: t.id,
             taskTitle: t.title,
             approval: (t.approvals ?? []).find((a) => a.status === "pending")!,
+            task: t,
           })),
         inProgress: tasks.filter((t) => t.status === "in_progress"),
         review: tasks.filter((t) => t.status === "review"),
