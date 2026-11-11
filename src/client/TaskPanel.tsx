@@ -4,6 +4,7 @@ import type { ApprovalRequest, ProjectTask, TaskPriority, TaskStatus, TraceRef, 
 import { getReadyTasks, generateWorkspaceSummaryReport, isTaskStale } from "../store/pipeline.ts";
 import { PlusIcon, RefreshIcon, TaskTabIcon } from "./icons.tsx";
 import { findCurrentSession, openWorkspaceFileViaDsh } from "./dsh-open.ts";
+import { dispatchPromptToAgent } from "./dispatch-agent.ts";
 import { MarkdownContent } from "./markdown.tsx";
 import { decisionChipStyle, traceChipStyle, TraceSections } from "./TraceSections.tsx";
 import { consumePendingNav } from "./pending-nav.ts";
@@ -659,12 +660,8 @@ export function TaskPanelBody(props?: {
     const target = readyTasks[0];
     if (!target) return;
     const prompt = `请帮我执行工作区就绪任务 [${target.id}]: "${target.title}"。\n${target.description ? `任务详情：\n${target.description}\n` : ""}\n请认领该任务并在完成后登记执行结论与交付物。`;
-    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-    if (dshCtx?.composer?.append) {
-      dshCtx.composer.append(prompt);
-    } else if (dshCtx?.conversation?.send) {
-      dshCtx.conversation.send({ text: prompt });
-    } else {
+    const dispatched = await dispatchPromptToAgent(prompt, { workspaceId: workspace.id });
+    if (!dispatched) {
       try {
         await navigator.clipboard.writeText(prompt);
         alert(`已复制派发提示词到剪贴板，请直接粘贴发送给 Agent！`);
@@ -684,17 +681,13 @@ export function TaskPanelBody(props?: {
     } catch {}
   };
 
-  // 观察记录「立即执行」：复用手动派发通道注入提示词，置 in_progress 并 ack
+  // 观察记录「立即执行」：统一派发通道注入提示词，置 in_progress 并 ack
   const handleExecuteDispatch = async (entry: DispatchLogEntry) => {
     const target = tasks.find((t) => t.id === entry.taskId);
     if (!target) return;
     const prompt = `请帮我执行工作区就绪任务 [${target.id}]: "${target.title}"。\n${target.description ? `任务详情：\n${target.description}\n` : ""}\n请认领该任务并在完成后登记执行结论与交付物。`;
-    const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-    if (dshCtx?.composer?.append) {
-      dshCtx.composer.append(prompt);
-    } else if (dshCtx?.conversation?.send) {
-      dshCtx.conversation.send({ text: prompt });
-    } else {
+    const dispatched = await dispatchPromptToAgent(prompt, { workspaceId: workspace.id });
+    if (!dispatched) {
       try {
         await navigator.clipboard.writeText(prompt);
         alert(`已复制派发提示词到剪贴板，请直接粘贴发送给 Agent！`);
@@ -713,7 +706,7 @@ export function TaskPanelBody(props?: {
       await fetch(`${API_BASE}/dispatch/ack`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspacePath: workspace.path, id: entry.id, status: "sent" }),
+        body: JSON.stringify({ workspacePath: workspace.path, id: entry.id, status: dispatched ? "sent" : "failed" }),
       });
       refresh();
       refreshDispatch();
@@ -1687,69 +1680,8 @@ function TaskCard({
       .filter(Boolean)
       .join("\n");
 
-    let dispatched = false;
-
-    try {
-      const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
-      const activeSession = findCurrentSession(dshCtx);
-      let targetSessionId = activeSession?.sessionId;
-
-      if (!targetSessionId && typeof document !== "undefined") {
-        targetSessionId =
-          document.querySelector("[data-sidebar-right-session]")?.getAttribute("data-sidebar-right-session") ||
-          document.querySelector("[data-session-id]")?.getAttribute("data-session-id") ||
-          undefined;
-      }
-
-      if (!targetSessionId && typeof localStorage !== "undefined") {
-        try {
-          const raw = localStorage.getItem("dsh.sessions.current");
-          if (raw) targetSessionId = JSON.parse(raw)?.sessionId;
-        } catch {}
-      }
-
-      // 如果当前没有会话，且已知 workspaceId，通过 uiWorkspace 连接会话
-      if (!targetSessionId && workspaceId && dshCtx?.uiWorkspace?.connectWorkspace) {
-        try {
-          targetSessionId = await dshCtx.uiWorkspace.connectWorkspace(workspaceId);
-          if (targetSessionId && dshCtx.uiWorkspace?.openSession) {
-            dshCtx.uiWorkspace.openSession(targetSessionId);
-          }
-        } catch (e) {
-          console.warn("Failed to auto-connect workspace session", e);
-        }
-      }
-
-      if (targetSessionId && dshCtx) {
-        // 方法 1: 尝试 binding.session.prompt
-        try {
-          const binding = dshCtx.sessions?.binding?.(targetSessionId);
-          if (binding?.session?.prompt) {
-            const res = await binding.session.prompt([{ type: "text", text: prompt }], "queue");
-            if (!res || res.ok !== false) {
-              dispatched = true;
-            }
-          }
-        } catch (e) {
-          console.warn("binding.session.prompt error", e);
-        }
-
-        // 方法 2: 尝试 scopedCtx.conversation.send
-        if (!dispatched) {
-          try {
-            const scopedCtx = dshCtx.sessions?.scope?.(targetSessionId);
-            if (scopedCtx?.conversation?.send) {
-              await scopedCtx.conversation.send(prompt);
-              dispatched = true;
-            }
-          } catch (e) {
-            console.warn("scopedCtx.conversation.send error", e);
-          }
-        }
-      }
-    } catch (err) {
-      console.warn("Direct dispatch to agent failed:", err);
-    }
+    // 统一派发通道（dispatch-agent.ts）：会话解析 + binding.prompt / scoped conversation.send
+    const dispatched = await dispatchPromptToAgent(prompt, { workspaceId });
 
     setAssignedStatus(dispatched ? "dispatched" : "failed");
     setTimeout(() => setAssignedStatus(null), 3000);

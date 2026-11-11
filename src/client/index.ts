@@ -3,6 +3,7 @@ import { TaskGuideIcon, GlobalBoardIcon } from "./icons.tsx";
 import { TaskPanelBody, TaskPanelTitle, resolveActiveWorkspace } from "./TaskPanel.tsx";
 import { GlobalBoardPanel } from "./GlobalBoard.tsx";
 import { openWorkspaceFileViaDsh, resolveWorkspacePath } from "./dsh-open.ts";
+import { dispatchPromptToAgent } from "./dispatch-agent.ts";
 
 export const TAB_ID = "dsh-workspace-tasks";
 export const TAB_KIND = "workspace-tasks";
@@ -22,10 +23,9 @@ interface PendingDispatchEntry {
 
 /**
  * 自动派发执行器（宿主算、客户端发）：
- * 后台轮询宿主引擎产生的 queued 条目，复用手动派发已验证的通道
- * （composer.append → conversation.send 兜底）注入派发提示词唤醒 Agent，
- * 随后置任务 in_progress（触发认领锁）并向宿主 ack 回执。
- * 失败标 failed 不静默重试（重试与熔断归 TASK-011）。
+ * 后台轮询宿主引擎产生的 queued 条目，经统一派发通道（dispatch-agent.ts）
+ * 注入提示词唤醒 Agent，随后置任务 in_progress（触发认领锁）并向宿主 ack 回执。
+ * 失败标 failed 不静默重试。
  */
 function startDispatchExecutor(ctx: ClientContext): () => void {
   let ticking = false;
@@ -41,7 +41,8 @@ function startDispatchExecutor(ctx: ClientContext): () => void {
     if (ticking) return;
     ticking = true;
     try {
-      const workspacePath = resolveActiveWorkspace(undefined, undefined).path;
+      const ws = resolveActiveWorkspace(undefined, undefined);
+      const workspacePath = ws.path;
       if (!workspacePath) return;
       const query = `?workspacePath=${encodeURIComponent(workspacePath)}`;
 
@@ -66,22 +67,8 @@ function startDispatchExecutor(ctx: ClientContext): () => void {
         task.description ? `任务详情：\n${task.description}\n\n` : ""
       }请先用 workspace_task 的 update 把状态置为 in_progress（会自动获取认领锁），完成后用 conclude 登记执行结论与交付物。`;
 
-      const anyCtx = ctx as unknown as {
-        composer?: { append?: (text: string) => void };
-        conversation?: { send?: (msg: { text: string }) => Promise<void> | void };
-      };
-      let sent = false;
-      try {
-        if (anyCtx.composer?.append) {
-          anyCtx.composer.append(prompt);
-          sent = true;
-        } else if (anyCtx.conversation?.send) {
-          await anyCtx.conversation.send({ text: prompt });
-          sent = true;
-        }
-      } catch {
-        sent = false;
-      }
+      // 统一派发通道：会话解析 + binding.prompt / scoped conversation.send
+      const sent = await dispatchPromptToAgent(prompt, { workspaceId: ws.id });
       if (!sent) {
         await ack(workspacePath, entry.id, "failed");
         return;

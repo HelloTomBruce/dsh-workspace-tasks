@@ -2,6 +2,12 @@
 
 本项目的版本契约：语义化版本 + git tag 为唯一事实来源。条目面向使用者写「你在乎什么」，不是 commit 流水账。
 
+## [0.7.3] - 2026-11-11
+
+### Fixed
+
+- 自动派发执行器唤醒失败（queued → failed）：派发通道调用签名与 DSH 实际服务不符（`conversation.send` 是 `send(text: string)` 而非 `send({ text })`，`composer` 服务不在注入清单）。抽出统一派发通道 `dispatch-agent.ts`（会话解析 + `sessions.binding().prompt` 队列模式 / `sessions.scope().conversation.send` 降级），执行器、就绪横幅、观察记录、任务卡片「交给 Agent」四个调用点全部收敛复用
+
 ## [0.7.2] - 2026-11-11
 
 ### Changed
