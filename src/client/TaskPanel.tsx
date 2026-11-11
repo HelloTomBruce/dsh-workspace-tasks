@@ -763,6 +763,9 @@ export function TaskPanelBody(props?: {
                   "div",
                   {
                     style: workspaceMenuStyle,
+                    // 关键：pointerdown 也要拦——根容器在 pointerdown 阶段关菜单，
+                    // 不拦的话菜单先卸载、click 落空（菜单项点了没反应）
+                    onPointerDown: (e: any) => e.stopPropagation(),
                     onClick: (e: any) => e.stopPropagation(),
                   },
                   createElement("div", { style: menuHeaderStyle }, "切换查看工作区任务"),
@@ -829,6 +832,8 @@ export function TaskPanelBody(props?: {
               "div",
               {
                 style: moreMenuStyle,
+                // pointerdown 也要拦：根容器在 pointerdown 阶段关菜单，不拦则菜单先卸载、click 落空
+                onPointerDown: (e: any) => e.stopPropagation(),
                 onClick: (e: any) => e.stopPropagation(),
               },
               dispatchRules &&
