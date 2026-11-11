@@ -2,6 +2,7 @@ import { createElement, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { ProjectTask } from "../store/types.ts";
 import type { GlobalOverview, WorkspaceOverview } from "../store/global.ts";
+import { setPendingNav } from "./pending-nav.ts";
 
 /**
  * 任务中台（跨工作区全局看板）：主区域全宽面板。
@@ -44,12 +45,15 @@ function useGlobalOverview(): { data: GlobalOverview | null; loading: boolean } 
 
 /** 打开右栏工作区看板并定位到指定任务 */
 function navigateToWorkspaceTask(workspacePath: string, taskId?: string): void {
+  // 先写挂单槽：看板未挂载/异步挂载时事件会丢，挂单由看板挂载后主动消费（兜底）
+  setPendingNav({ workspacePath, taskId });
   const dshCtx = (window as unknown as { __DSH_TASK_CLIENT_CTX__?: any }).__DSH_TASK_CLIENT_CTX__;
   try {
     dshCtx?.sidebarRight?.openTab?.("workspace-tasks");
   } catch (e) {
     console.warn("[dsh-workspace-tasks] openTab failed:", e);
   }
+  // 事件路径：看板已打开时的即时响应（监听器会顺手清掉挂单，避免重复消费）
   window.dispatchEvent(
     new CustomEvent("dsh-tasks:open-workspace", { detail: { workspacePath, taskId } })
   );

@@ -6,6 +6,7 @@ import { PlusIcon, RefreshIcon, TaskTabIcon } from "./icons.tsx";
 import { findCurrentSession, openWorkspaceFileViaDsh } from "./dsh-open.ts";
 import { MarkdownContent } from "./markdown.tsx";
 import { decisionChipStyle, traceChipStyle, TraceSections } from "./TraceSections.tsx";
+import { consumePendingNav } from "./pending-nav.ts";
 
 const API_BASE = "/__dsh-tasks__";
 
@@ -619,16 +620,34 @@ export function TaskPanelBody(props?: {
     }
   };
 
-  // 监听中台面板（主区域全局看板）的跳转请求：切换工作区并滚动定位任务卡片
+  // 滚动定位（带重试）：工作区切换后列表异步加载，目标卡片可能晚到，最多重试 6 次
+  const scrollToTaskWithRetry = (targetId: string, attempt = 0) => {
+    const el = document.getElementById(`task-card-${targetId}`);
+    if (el) {
+      handleNavigateToTask(targetId);
+      return;
+    }
+    if (attempt < 6) setTimeout(() => scrollToTaskWithRetry(targetId, attempt + 1), 400);
+  };
+
+  // 中台（主区域全局看板）跳转请求：挂单（挂载时消费，兜底 openTab 后异步挂载的场景）
+  // + 事件（看板已打开时的即时响应）。两条路径都会先清挂单，避免重复消费。
   useEffect(() => {
-    const onOpenWorkspace = (e: Event) => {
-      const detail = (e as CustomEvent<{ workspacePath?: string; taskId?: string }>).detail;
+    const applyNav = (detail: { workspacePath?: string; taskId?: string }) => {
       if (!detail?.workspacePath) return;
+      // 重置筛选状态，保证目标卡片在列表中渲染（否则滚动定位找不到节点）
+      setFilter("all");
+      setSelectedTag(null);
+      setSearchQuery("");
       setManualWorkspacePath(detail.workspacePath);
-      if (detail.taskId) {
-        // 等工作区切换后的列表渲染完成再滚动定位
-        setTimeout(() => handleNavigateToTask(detail.taskId!), 500);
-      }
+      if (detail.taskId) scrollToTaskWithRetry(detail.taskId);
+    };
+    // 挂载时主动消费挂单：openTab 打开看板 → React 异步挂载完成 → 在这里取出跳转请求
+    const pending = consumePendingNav();
+    if (pending) applyNav(pending);
+    const onOpenWorkspace = (e: Event) => {
+      consumePendingNav(); // 事件路径优先，挂单作废
+      applyNav((e as CustomEvent<{ workspacePath?: string; taskId?: string }>).detail ?? {});
     };
     window.addEventListener("dsh-tasks:open-workspace", onOpenWorkspace);
     return () => window.removeEventListener("dsh-tasks:open-workspace", onOpenWorkspace);
