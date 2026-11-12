@@ -3,7 +3,7 @@ import { TaskGuideIcon, GlobalBoardIcon } from "./icons.tsx";
 import { TaskPanelBody, TaskPanelTitle, resolveActiveWorkspace } from "./TaskPanel.tsx";
 import { GlobalBoardPanel } from "./GlobalBoard.tsx";
 import { openWorkspaceFileViaDsh, resolveWorkspacePath } from "./dsh-open.ts";
-import { dispatchPromptToAgent } from "./dispatch-agent.ts";
+import { buildDispatchPrompt, dispatchPromptToAgent } from "./dispatch-agent.ts";
 
 export const TAB_ID = "dsh-workspace-tasks";
 export const TAB_KIND = "workspace-tasks";
@@ -55,9 +55,7 @@ async function buildPrompt(workspacePath: string, entry: PendingDispatchEntry): 
   };
   const task = listJson?.data?.tasks?.find((t) => t.id === entry.taskId);
   if (!task) return null;
-  return `[自动派发] 请执行工作区就绪任务 [${task.id}]: "${task.title}"。
-【工作区根目录】：${workspacePath}
-${task.description ? `任务详情：\n${task.description}\n\n` : ""}请先用 workspace_task 的 update 把状态置为 in_progress（会自动获取认领锁），完成后用 conclude 登记执行结论与交付物。`;
+  return buildDispatchPrompt(task, { workspacePath, auto: true });
 }
 
 /**
