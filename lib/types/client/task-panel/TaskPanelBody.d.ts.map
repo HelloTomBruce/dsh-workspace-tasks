@@ -1,0 +1,1 @@
+{"version":3,"file":"TaskPanelBody.d.ts","sourceRoot":"","sources":["../../../../src/client/task-panel/TaskPanelBody.tsx"],"names":[],"mappings":"AAiDA,wBAAgB,aAAa,CAAC,KAAK,CAAC,EAAE;IACpC,SAAS,CAAC,EAAE,MAAM,CAAC;IACnB,UAAU,CAAC,EAAE,MAAM,GAAG,CAAC;IACvB,QAAQ,CAAC,EAAE,CAAC,IAAI,EAAE,MAAM,EAAE,aAAa,CAAC,EAAE,MAAM,KAAK,OAAO,CAAC,IAAI,CAAC,CAAC;CACpE,+BA8nBA"}

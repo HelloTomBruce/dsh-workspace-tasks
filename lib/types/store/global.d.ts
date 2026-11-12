@@ -1,3 +1,4 @@
+import type { DispatchRecord } from "./dispatch.ts";
 import type { ApprovalRequest, ProjectTask, WorkspaceTasksDocument, WorkspaceTasksSummary } from "./types.ts";
 /**
  * 跨工作区全局聚合（个人中台视图的数据层）：扫描存储目录里所有工作区任务文档，
@@ -40,6 +41,30 @@ export interface WorkspaceOverview {
     /** 该工作区的自动派发模式徽标 */
     dispatchMode: "observe" | "auto" | "off";
 }
+/** 跨工作区最近动态条目（检查点/决策，stigmergy「读痕迹」的中台落地） */
+export interface ActivityEntry {
+    workspacePath: string;
+    /** 工作区文件夹名（展示用） */
+    wsTitle: string;
+    taskId: string;
+    taskTitle: string;
+    kind: "checkpoint" | "decision";
+    at: string;
+    /** checkpoint：变更字段名 */
+    field?: string;
+    /** checkpoint：变更前后值快照（JSON 序列化原文，客户端负责可读化） */
+    from?: string;
+    to?: string;
+    /** decision：决策标题与操作者 */
+    decisionTitle?: string;
+    actor?: string;
+}
+/** 跨工作区派发记录条目（观察模式的 would-dispatch 可供中台直接执行/忽略） */
+export interface DispatchLogItem {
+    workspacePath: string;
+    wsTitle: string;
+    record: DispatchRecord;
+}
 export interface GlobalOverview {
     generatedAt: string;
     workspaces: WorkspaceOverview[];
@@ -53,6 +78,10 @@ export interface GlobalOverview {
         blocked: number;
         ready: number;
     };
+    /** 跨工作区最近动态：检查点 + 决策，时间倒序，前 8 条 */
+    recentActivity: ActivityEntry[];
+    /** 跨工作区派发记录：时间倒序，前 10 条 */
+    recentDispatches: DispatchLogItem[];
 }
 /** 扫描存储目录，返回所有工作区任务文档（排除 dispatch 文件；坏文件 parse 为 null）。供跨工作区派发取件复用。 */
 export declare function scanWorkspaceDocuments(): Promise<Array<{

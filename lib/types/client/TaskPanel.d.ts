@@ -1,29 +1,14 @@
-import type { CSSProperties } from "react";
-export interface ActiveWorkspaceInfo {
-    id?: string;
-    path: string;
-    title: string;
-}
-export declare function findBestMatchingWorkspace(items: Array<{
-    workspaceId: string;
-    path: string;
-    title: string;
-    sessionIds?: string[];
-}>, targetPath?: string): ActiveWorkspaceInfo | null;
-export declare function resolveActiveWorkspace(explicitSessionId?: string, explicitWorkspacePath?: string): ActiveWorkspaceInfo;
-export declare function useActiveWorkspace(explicitSessionId?: string, explicitWorkspacePath?: string): ActiveWorkspaceInfo;
-export declare function TaskPanelTitle(props?: {
-    sessionId?: string;
-    useTabInfo?: () => any;
-}): import("react").DetailedReactHTMLElement<{
-    style: CSSProperties;
-}, HTMLElement>;
-export declare function TaskPanelBody(props?: {
-    sessionId?: string;
-    useTabInfo?: () => any;
-    openFile?: (path: string, workspacePath?: string) => Promise<void>;
-}): import("react").DetailedReactHTMLElement<{
-    style: CSSProperties;
-    onPointerDown: () => void;
-}, HTMLElement>;
+/**
+ * 工作区任务看板（右侧栏面板）——re-export 壳。
+ * 实现已拆分为 task-panel/ 模块目录（JSX 化）：
+ *   styles.ts（样式）/ workspace.ts（活跃工作区解析）/ hooks.ts（数据轮询 hooks）/
+ *   banners.tsx（顶部横幅）/ DispatchSections.tsx（派发区）/ TaskCard.tsx /
+ *   ExportReportModal.tsx / CreateTaskModal.tsx /
+ *   TaskPanelBody.tsx（主面板）/ TaskPanelTitle.tsx（标题）
+ * 本文件保持 `client/index.ts` 的导入路径稳定。
+ */
+export { TaskPanelBody } from "./task-panel/TaskPanelBody.tsx";
+export { TaskPanelTitle } from "./task-panel/TaskPanelTitle.tsx";
+export { findBestMatchingWorkspace, resolveActiveWorkspace, useActiveWorkspace, } from "./task-panel/workspace.ts";
+export type { ActiveWorkspaceInfo } from "./task-panel/workspace.ts";
 //# sourceMappingURL=TaskPanel.d.ts.map

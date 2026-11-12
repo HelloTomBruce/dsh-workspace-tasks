@@ -38,6 +38,7 @@ Agent 遇到必须人拍板的事（删数据、停服、花钱、对外发布�
 1. **挂起零消耗**：任务转入 `blocked`，无任何进程、无轮询（SOP 明确禁止 Agent 等候），认领锁保留防止被其他会话捡走；
 2. **批红**：看板出现 🔔 待拍板横幅与批红卡片，人点选一个选项（或驳回备注）——**resolve/reject 只走 REST（UI），Agent 工具永不开放，防止自我批准**；
 3. **自动落决策**：批准即生成一条不可改写 `DecisionRecord`（标题「拍板：…」，含选中选项原话、未选项进入 alternatives、`actor: human`），审批记录回链 `decisionId`，任务恢复原状态（通常 `in_progress`）无缝续跑；驳回不落决策，任务保持 blocked 等 Agent 重新规划。
+4. **批红即唤醒（反馈闭环）**：批红/驳回完成后，UI 自动按认领锁的 `sessionHint` 定向唤醒原执行会话（注入含选中选项/驳回备注的反馈提示词），Agent 读取决策记录无缝续跑——不需要人再手动告知；会话已关闭时看板会提示「请手动告知」。
 
 ### 🔒 认领锁（Claim/Lease）：同一件事只一个负责人
 
@@ -63,7 +64,7 @@ Agent 遇到必须人拍板的事（删数据、停服、花钱、对外发布�
 
 - **停滞检测**：`in_progress` 任务超过 `staleHours`（默认 24 小时，可经派发规则接口调整）无新检查点即判定停滞——看板顶部黄条提醒，支持一键「降级回待办」（同时释放认领锁，重新进入就绪队列）；
 - **派发 TTL 熔断**：自动派发链每次唤醒 `hop+1`（人工干预不清零，与网络包 TTL 同语义），超过 **8 层**即熔断——不再派发，记录 `tripped` 并把目标任务转 `blocked` 斩断失控链，看板顶部红色告警等人工处置（去处理/知道了）；
-- **可派发语义对齐**：阻塞待拍板与待验收（review）的任务是「等人的」而非「等 Agent 的」，自动派发引擎与全局中台的就绪分组都只统计 `todo / in_progress（未认领续跑）`，同一件事绝不重复打扰你。
+- **可派发语义对齐**：全局中台的就绪分组只统计 `todo`（`in_progress` 已有归属在跑，不再重复出现）；阻塞待拍板与待验收（review）的任务是「等人的」而非「等 Agent 的」，各有专属分组，同一件事绝不重复打扰你。
 
 ### 🗂️ 任务中台（跨工作区全局看板）
 
@@ -136,11 +137,29 @@ dsh-workspace-tasks/
 │   ├── tools/
 │   │   └── task-tools.ts      # Agent 工具 (workspace_task: record_decision / get_task_history / link_trace...)
 │   └── client/
-│       ├── index.ts           # 客户端入口（注册 sidebarRightTabs 与 UI 插槽）
-│       ├── icons.tsx          # 主题自适应 SVG 图标
-│       ├── markdown.tsx       # Markdown 渲染器（描述/结论/决策 rationale 共用）
-│       ├── TraceSections.tsx  # 痕迹 UI：决策演进链 / 跨工作区引用 / 过程检查点时间线
-│       └── TaskPanel.tsx      # 看板、状态筛选、任务卡片与结论抽屉组件
+│       ├── index.ts               # 客户端入口（注册 sidebarRightTabs 与 UI 插槽）
+│       ├── icons.tsx              # 主题自适应 SVG 图标
+│       ├── markdown.tsx           # Markdown 渲染器（描述/结论/决策 rationale 共用）
+│       ├── TraceSections.tsx      # 痕迹 UI：决策演进链 / 跨工作区引用 / 过程检查点时间线
+│       ├── dispatch-agent.ts      # 统一派发通道（严格路由 / sessionId 直发 / 批红唤醒）
+│       ├── TaskPanel.tsx          # re-export 壳（保持导入路径稳定）
+│       ├── task-panel/            # 右栏工作区看板（JSX 模块目录）
+│       │   ├── styles.ts          # 全部样式（纯数据）
+│       │   ├── workspace.ts       # 活跃工作区解析
+│       │   ├── hooks.ts           # useTasks / useDispatch 数据轮询
+│       │   ├── banners.tsx        # 熔断/停滞/待拍板/观察/就绪横幅
+│       │   ├── DispatchSections.tsx # 三态开关 / 跨工作区开关 / 派发记录
+│       │   ├── TaskCard.tsx       # 任务卡片（状态流转/批红/依赖/交付物）
+│       │   ├── ExportReportModal.tsx / CreateTaskModal.tsx
+│       │   └── TaskPanelBody.tsx / TaskPanelTitle.tsx
+│       ├── GlobalBoard.tsx        # re-export 壳
+│       └── global-board/          # 任务中台（JSX 模块目录）
+│           ├── styles.ts / utils.ts / types.ts
+│           ├── primitives.tsx     # RowAction / ConfirmRowAction / TaskRow / Group / EmptyState
+│           ├── TaskDetailModal.tsx # 详情弹窗（Tab：待拍板/描述/结论/决策/审批/引用/动态）
+│           ├── WorkspaceCard.tsx  # 工作区卡片（注意力优先级分组）
+│           ├── FeedSection.tsx    # 动态流双栏（最近动态 + 派发记录）
+│           └── GlobalBoardPanel.tsx # 主面板（总览 chip / 搜索 / toast / 动作处理器）
 └── tests/
     ├── task-store.spec.ts     # 存储层单元测试
     └── task-tools.spec.ts     # Agent 工具层单元测试
