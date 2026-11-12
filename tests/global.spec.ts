@@ -135,4 +135,58 @@ describe("跨工作区全局聚合（中台视图）", () => {
     expect(overview.workspaces).toEqual([]);
     expect(overview.totals.workspaces).toBe(0);
   });
+
+  it("最近动态聚合：检查点+决策跨工作区合并，时间倒序", async () => {
+    // wsA：状态变更产生检查点 + 一条决策
+    const t1 = await TaskStore.createTask(wsA, { title: "A task" });
+    await TaskStore.updateTask(wsA, t1.id, { status: "in_progress" });
+    await TaskStore.addDecision(wsA, t1.id, { title: "用 JSON 存储", rationale: "简单可靠" });
+    // wsB：另一条检查点
+    const t2 = await TaskStore.createTask(wsB, { title: "B task" });
+    await TaskStore.updateTask(wsB, t2.id, { status: "review" });
+
+    const overview = await listGlobalOverview();
+    expect(overview.recentActivity.length).toBeGreaterThan(0);
+
+    // 时间倒序
+    for (let i = 1; i < overview.recentActivity.length; i++) {
+      const prev = new Date(overview.recentActivity[i - 1]!.at).getTime();
+      const cur = new Date(overview.recentActivity[i]!.at).getTime();
+      expect(prev).toBeGreaterThanOrEqual(cur);
+    }
+
+    const kinds = overview.recentActivity.map((a) => a.kind);
+    expect(kinds).toContain("checkpoint");
+    expect(kinds).toContain("decision");
+
+    // 决策条目带标题与操作者，检查点条目带 field/from/to
+    const decision = overview.recentActivity.find((a) => a.kind === "decision");
+    expect(decision?.decisionTitle).toBe("用 JSON 存储");
+    expect(decision?.wsTitle).toBe("proj-alpha");
+    expect(decision?.taskId).toBe(t1.id);
+    const checkpoint = overview.recentActivity.find((a) => a.kind === "checkpoint" && a.field === "status");
+    expect(checkpoint?.from).toBeDefined();
+    expect(checkpoint?.to).toBeDefined();
+
+    // dangling 工作区不产生动态
+    const badPath = path.join(tmpDir, "broken-ws-deadbeef.json");
+    await fs.writeFile(badPath, "{ not valid json !!!", "utf-8");
+    const overview2 = await listGlobalOverview();
+    expect(overview2.recentActivity.every((a) => a.workspacePath !== "")).toBe(true);
+  });
+
+  it("派发记录聚合：跨工作区合并、携带工作区标题与状态", async () => {
+    await TaskStore.createTask(wsA, { title: "A ready", priority: "P0" });
+    await DispatchEngine.updateRules(wsA, { mode: "auto" });
+    const record = await DispatchEngine.evaluate(wsA);
+    expect(record).not.toBeNull();
+
+    const overview = await listGlobalOverview();
+    expect(overview.recentDispatches.length).toBe(1);
+    const item = overview.recentDispatches[0]!;
+    expect(item.workspacePath).toBe(wsA);
+    expect(item.wsTitle).toBe("proj-alpha");
+    expect(item.record.taskId).toBe(record!.taskId);
+    expect(item.record.status).toBe("queued");
+  });
 });
